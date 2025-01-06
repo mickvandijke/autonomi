@@ -6,8 +6,8 @@
 // KIND, either express or implied. Please review the Licences for the specific language governing
 // permissions and limitations relating to use of the SAFE Network Software.
 
-use autonomi::Client;
 use autonomi::Multiaddr;
+use autonomi::{get_evm_network_from_env, Client};
 use color_eyre::eyre::bail;
 use color_eyre::eyre::Result;
 use indicatif::ProgressBar;
@@ -23,7 +23,9 @@ pub async fn connect_to_network(peers: Vec<Multiaddr>) -> Result<Client> {
     progress_bar.set_message("Connecting to The Autonomi Network...");
 
     match Client::init_with_peers(peers).await {
-        Ok(client) => {
+        Ok(mut client) => {
+            let evm_network = get_evm_network_from_env()?;
+            client.set_evm_network(evm_network);
             info!("Connected to the Network");
             progress_bar.finish_with_message("Connected to the Network");
             Ok(client)
