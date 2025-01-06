@@ -62,6 +62,7 @@ impl Client {
             .into_iter()
             .map(|content_addr| fetch_store_quote_with_retries(&self.network, content_addr))
             .collect();
+
         let raw_quotes_per_addr = futures::future::try_join_all(futures).await?;
 
         // choose the quotes to pay for each address
@@ -70,9 +71,15 @@ impl Client {
         let mut rate_limiter = RateLimiter::new();
 
         for (content_addr, raw_quotes) in raw_quotes_per_addr {
+            debug!(
+                "fetching market price for content_addr: {content_addr}, with {} quotes.",
+                raw_quotes.len()
+            );
+
             // FIXME: find better way to deal with paid content addrs and feedback to the user
             // assume that content addr is already paid for and uploaded
             if raw_quotes.is_empty() {
+                debug!("content_addr: {content_addr} is already paid for. No need to fetch market price.");
                 continue;
             }
 
@@ -89,6 +96,8 @@ impl Client {
                 quoting_metrics.clone(),
             )
             .await?;
+
+            debug!("market prices: {all_prices:?}");
 
             let mut prices: Vec<(PeerId, PaymentQuote, Amount)> = all_prices
                 .into_iter()
