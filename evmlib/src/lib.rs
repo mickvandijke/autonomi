@@ -45,12 +45,18 @@ const ARBITRUM_ONE_PAYMENT_TOKEN_ADDRESS: Address =
 const ARBITRUM_SEPOLIA_PAYMENT_TOKEN_ADDRESS: Address =
     address!("BE1802c27C324a28aeBcd7eeC7D734246C807194");
 
+const ARBITRUM_SEPOLIA_TEST_PAYMENT_TOKEN_ADDRESS: Address =
+    address!("4bc1aCE0E66170375462cB4E6Af42Ad4D5EC689C");
+
 // Should be updated when the smart contract changes!
 const ARBITRUM_ONE_DATA_PAYMENTS_ADDRESS: Address =
     address!("607483B50C5F06c25cDC316b6d1E071084EeC9f5");
 
 const ARBITRUM_SEPOLIA_DATA_PAYMENTS_ADDRESS: Address =
     address!("993C7739f50899A997fEF20860554b8a28113634");
+
+const ARBITRUM_SEPOLIA_TEST_DATA_PAYMENTS_ADDRESS: Address =
+    address!("7f0842a78f7d4085d975ba91d630d680f91b1295");
 
 #[serde_as]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -78,6 +84,7 @@ pub enum Network {
     #[default]
     ArbitrumOne,
     ArbitrumSepolia,
+    ArbitrumSepoliaTest,
     Custom(CustomNetwork),
 }
 
@@ -86,6 +93,7 @@ impl std::fmt::Display for Network {
         match self {
             Network::ArbitrumOne => write!(f, "evm-arbitrum-one"),
             Network::ArbitrumSepolia => write!(f, "evm-arbitrum-sepolia"),
+            Network::ArbitrumSepoliaTest => write!(f, "evm-arbitrum-sepolia-test"),
             Network::Custom(_) => write!(f, "evm-custom"),
         }
     }
@@ -104,6 +112,7 @@ impl Network {
         match self {
             Network::ArbitrumOne => "arbitrum-one",
             Network::ArbitrumSepolia => "arbitrum-sepolia",
+            Network::ArbitrumSepoliaTest => "arbitrum-sepolia-test",
             Network::Custom(_) => "custom",
         }
     }
@@ -112,6 +121,7 @@ impl Network {
         match self {
             Network::ArbitrumOne => &PUBLIC_ARBITRUM_ONE_HTTP_RPC_URL,
             Network::ArbitrumSepolia => &PUBLIC_ARBITRUM_SEPOLIA_HTTP_RPC_URL,
+            Network::ArbitrumSepoliaTest => &PUBLIC_ARBITRUM_SEPOLIA_HTTP_RPC_URL,
             Network::Custom(custom) => &custom.rpc_url_http,
         }
     }
@@ -120,6 +130,7 @@ impl Network {
         match self {
             Network::ArbitrumOne => &ARBITRUM_ONE_PAYMENT_TOKEN_ADDRESS,
             Network::ArbitrumSepolia => &ARBITRUM_SEPOLIA_PAYMENT_TOKEN_ADDRESS,
+            Network::ArbitrumSepoliaTest => &ARBITRUM_SEPOLIA_TEST_PAYMENT_TOKEN_ADDRESS,
             Network::Custom(custom) => &custom.payment_token_address,
         }
     }
@@ -128,6 +139,7 @@ impl Network {
         match self {
             Network::ArbitrumOne => &ARBITRUM_ONE_DATA_PAYMENTS_ADDRESS,
             Network::ArbitrumSepolia => &ARBITRUM_SEPOLIA_DATA_PAYMENTS_ADDRESS,
+            Network::ArbitrumSepoliaTest => &ARBITRUM_SEPOLIA_TEST_DATA_PAYMENTS_ADDRESS,
             Network::Custom(custom) => &custom.data_payments_address,
         }
     }
