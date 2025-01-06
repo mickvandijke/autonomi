@@ -10,6 +10,9 @@ pub(crate) enum EvmNetworkCommand {
     /// Use the Arbitrum Sepolia network
     EvmArbitrumSepolia,
 
+    /// Use the Arbitrum Sepolia network with test contracts
+    EvmArbitrumSepoliaTest,
+
     /// Use a custom network
     EvmCustom {
         /// The RPC URL for the custom network
@@ -32,6 +35,7 @@ impl Into<EvmNetwork> for EvmNetworkCommand {
         match self {
             Self::EvmArbitrumOne => EvmNetwork::ArbitrumOne,
             Self::EvmArbitrumSepolia => EvmNetwork::ArbitrumSepolia,
+            Self::EvmArbitrumSepoliaTest => EvmNetwork::ArbitrumSepoliaTest,
             Self::EvmCustom {
                 rpc_url,
                 payment_token_address,

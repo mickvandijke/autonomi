@@ -19,6 +19,9 @@ pub enum EvmNetworkCommand {
     /// Use the Arbitrum Sepolia network
     EvmArbitrumSepolia,
 
+    /// Use the Arbitrum Sepolia network with test contracts
+    EvmArbitrumSepoliaTest,
+
     /// Use a custom network
     EvmCustom {
         /// The RPC URL for the custom network
@@ -45,6 +48,7 @@ impl TryInto<EvmNetwork> for EvmNetworkCommand {
         match self {
             Self::EvmArbitrumOne => Ok(EvmNetwork::ArbitrumOne),
             Self::EvmArbitrumSepolia => Ok(EvmNetwork::ArbitrumSepolia),
+            Self::EvmArbitrumSepoliaTest => Ok(EvmNetwork::ArbitrumSepoliaTest),
             Self::EvmLocal => {
                 if !cfg!(feature = "local") {
                     return Err(color_eyre::eyre::eyre!(
