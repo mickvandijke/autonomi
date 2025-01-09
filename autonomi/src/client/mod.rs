@@ -95,7 +95,7 @@ impl Default for ClientConfig {
             #[cfg(not(feature = "local"))]
             local: false,
             peers: None,
-            evm_network: Default::default(),
+            evm_network: EvmNetwork::try_from_env().unwrap_or_default(),
         }
     }
 }
@@ -274,10 +274,6 @@ impl Client {
         debug!("All events to the clients are enabled");
 
         client_event_receiver
-    }
-
-    pub fn set_evm_network(&mut self, evm_network: EvmNetwork) {
-        self.evm_network = evm_network;
     }
 }
 
