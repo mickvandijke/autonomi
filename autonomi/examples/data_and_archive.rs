@@ -1,3 +1,4 @@
+use ant_evm::EvmNetwork;
 use autonomi::{Bytes, Client, Metadata, PrivateArchive};
 use test_utils::evm::get_funded_wallet;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -9,8 +10,9 @@ async fn main() -> eyre::Result<()> {
         .with(EnvFilter::from_env("RUST_LOG"))
         .init();
 
-    let client = Client::init().await?;
-    let wallet = get_funded_wallet();
+    let evm_network = EvmNetwork::try_from_env().unwrap_or_default();
+    let client = Client::init(evm_network).await?;
+    let wallet = get_funded_wallet(evm_network);
 
     // Upload 10MiB of random data and verify it by fetching it back.
     let data = Bytes::from("Hello, World!");

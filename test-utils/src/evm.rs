@@ -13,9 +13,7 @@ use color_eyre::{
 use evmlib::{utils::get_evm_network_from_env, wallet::Wallet, Network};
 use std::env;
 
-pub fn get_funded_wallet() -> evmlib::wallet::Wallet {
-    let network =
-        get_evm_network_from_env().expect("Failed to get EVM network from environment variables");
+pub fn get_funded_wallet(network: Network) -> evmlib::wallet::Wallet {
     if matches!(network, Network::ArbitrumOne) {
         panic!("You're trying to use ArbitrumOne network. Use a custom network for testing.");
     }

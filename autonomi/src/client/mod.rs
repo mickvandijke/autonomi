@@ -95,7 +95,7 @@ impl Default for ClientConfig {
             #[cfg(not(feature = "local"))]
             local: false,
             peers: None,
-            evm_network: EvmNetwork::try_from_env().unwrap_or_default(),
+            evm_network: Default::default(),
         }
     }
 }
@@ -120,16 +120,28 @@ impl Client {
     /// Initialize the client with default configuration.
     ///
     /// See [`Client::init_with_config`].
-    pub async fn init() -> Result<Self, ConnectError> {
+    pub async fn default() -> Result<Self, ConnectError> {
         Self::init_with_config(Default::default()).await
+    }
+
+    /// Initialize the client with default configuration.
+    ///
+    /// See [`Client::init_with_config`].
+    pub async fn init(evm_network: EvmNetwork) -> Result<Self, ConnectError> {
+        Self::init_with_config(ClientConfig {
+            evm_network,
+            ..Default::default()
+        })
+        .await
     }
 
     /// Initialize a client that is configured to be local.
     ///
     /// See [`Client::init_with_config`].
-    pub async fn init_local() -> Result<Self, ConnectError> {
+    pub async fn init_local(evm_network: EvmNetwork) -> Result<Self, ConnectError> {
         Self::init_with_config(ClientConfig {
             local: true,
+            evm_network,
             ..Default::default()
         })
         .await
@@ -140,22 +152,27 @@ impl Client {
     /// If any of the provided peers is a global address, the client will not be local.
     ///
     /// ```no_run
+    /// # use ant_evm::EvmNetwork;
     /// # use autonomi::Client;
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let evm_network = EvmNetwork::default();
     /// // Will set `local` to true.
-    /// let client = Client::init_with_peers(vec!["/ip4/127.0.0.1/udp/1234/quic-v1".parse()?]).await?;
+    /// let client = Client::init_with_peers(evm_network, vec!["/ip4/127.0.0.1/udp/1234/quic-v1".parse()?]).await?;
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn init_with_peers(peers: Vec<Multiaddr>) -> Result<Self, ConnectError> {
+    pub async fn init_with_peers(
+        evm_network: EvmNetwork,
+        peers: Vec<Multiaddr>,
+    ) -> Result<Self, ConnectError> {
         // Any global address makes the client non-local
         let local = !peers.iter().any(multiaddr_is_global);
 
         Self::init_with_config(ClientConfig {
             local,
             peers: Some(peers),
-            evm_network: EvmNetwork::try_from_env().unwrap_or_default(),
+            evm_network,
         })
         .await
     }
