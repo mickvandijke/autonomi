@@ -14,6 +14,7 @@ use crate::metrics::NodeMetricsRecorder;
 use crate::RunningNode;
 use ant_bootstrap::BootstrapCacheStore;
 use ant_evm::RewardsAddress;
+use ant_evm::{EvmNetwork, U256};
 #[cfg(feature = "open-metrics")]
 use ant_networking::MetricsRegistries;
 use ant_networking::{
@@ -48,8 +49,6 @@ use tokio::{
     sync::mpsc::Receiver,
     task::{spawn, JoinSet},
 };
-
-use ant_evm::{EvmNetwork, U256};
 
 /// Interval to trigger replication of all records to all peers.
 /// This is the max time it should take. Minimum interval at any node will be half this

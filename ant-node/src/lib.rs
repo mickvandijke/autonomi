@@ -32,6 +32,10 @@ mod put_validation;
 mod python;
 mod quote;
 mod replication;
+#[allow(missing_docs)]
+pub mod spawn;
+#[allow(missing_docs)]
+pub mod utils;
 
 pub use self::{
     event::{NodeEvent, NodeEventsChannel, NodeEventsReceiver},
@@ -41,15 +45,14 @@ pub use self::{
 
 use crate::error::{Error, Result};
 
+use ant_evm::RewardsAddress;
 use ant_networking::{Network, SwarmLocalState};
 use ant_protocol::{get_port_from_multiaddr, NetworkAddress};
-use libp2p::PeerId;
+use libp2p::{Multiaddr, PeerId};
 use std::{
     collections::{BTreeMap, HashSet},
     path::PathBuf,
 };
-
-use ant_evm::RewardsAddress;
 
 /// Once a node is started and running, the user obtains
 /// a `NodeRunning` object which can be used to interact with it.
@@ -83,6 +86,12 @@ impl RunningNode {
     pub async fn get_swarm_local_state(&self) -> Result<SwarmLocalState> {
         let state = self.network.get_swarm_local_state().await?;
         Ok(state)
+    }
+
+    /// Return the node's listening addresses.
+    pub async fn get_listen_addrs(&self) -> Result<Vec<Multiaddr>> {
+        let listeners = self.network.get_swarm_local_state().await?.listeners;
+        Ok(listeners)
     }
 
     /// Return the node's listening port

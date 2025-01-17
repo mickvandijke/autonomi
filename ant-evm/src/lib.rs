@@ -18,6 +18,7 @@ pub use evmlib::contract::payment_vault;
 pub use evmlib::cryptography;
 #[cfg(feature = "external-signer")]
 pub use evmlib::external_signer;
+pub use evmlib::testnet::Testnet as EvmTestnet;
 pub use evmlib::utils;
 pub use evmlib::utils::get_evm_network;
 pub use evmlib::utils::{DATA_PAYMENTS_ADDRESS, PAYMENT_TOKEN_ADDRESS, RPC_URL};
