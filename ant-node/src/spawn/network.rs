@@ -202,6 +202,8 @@ async fn spawn_network(
 mod tests {
     use super::*;
     use ant_evm::EvmTestnet;
+    use std::time::Duration;
+    use tokio::time::sleep;
 
     #[tokio::test]
     async fn test_spawn_network() {
@@ -224,6 +226,18 @@ mod tests {
             let listen_addrs = node.get_listen_addrs().await.unwrap();
 
             assert!(!listen_addrs.is_empty());
+        }
+
+        // Wait for nodes to discover each other
+        sleep(Duration::from_secs(5)).await;
+
+        // Validate that all nodes know each other
+        for node in running_network.running_nodes() {
+            let known_peers = node.network.get_local_peers_with_multiaddr().await.unwrap();
+
+            println!("Known peers: {known_peers:?}");
+
+            // TODO: nodes do not know each other..
         }
 
         running_network.shutdown().await;
