@@ -169,7 +169,13 @@ async fn spawn_network(
 
         for peer in running_nodes.iter() {
             if let Ok(listen_addrs) = peer.get_listen_addrs().await {
-                initial_peers.extend(listen_addrs);
+                // Append the peer id to the listen addresses
+                let multi_addrs: Vec<Multiaddr> = listen_addrs
+                    .into_iter()
+                    .filter_map(|listen_addr| listen_addr.with_p2p(peer.peer_id()).ok())
+                    .collect();
+
+                initial_peers.extend(multi_addrs);
             }
         }
 
@@ -228,12 +234,17 @@ mod tests {
             assert!(!listen_addrs.is_empty());
         }
 
-        // Wait for nodes to discover each other
-        sleep(Duration::from_secs(5)).await;
+        // Wait for nodes to dial each other
+        sleep(Duration::from_secs(20)).await;
 
-        // Validate that all nodes know each other
+        // TODO: Validate that all nodes know each other
         for node in running_network.running_nodes() {
-            let known_peers = node.network.get_local_peers_with_multiaddr().await.unwrap();
+            let known_peers = node
+                .network
+                .get_swarm_local_state()
+                .await
+                .unwrap()
+                .connected_peers;
 
             println!("Known peers: {known_peers:?}");
 
