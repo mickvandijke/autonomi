@@ -45,6 +45,8 @@ use std::{
     },
     time::Duration,
 };
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
 use tokio::{
     sync::mpsc::Receiver,
     task::{spawn, JoinSet},
@@ -188,6 +190,7 @@ impl NodeBuilder {
 
         let (network, network_event_receiver, swarm_driver) =
             network_builder.build_node(self.root_dir.clone())?;
+
         let node_events_channel = NodeEventsChannel::default();
 
         let node = NodeInner {
@@ -200,18 +203,27 @@ impl NodeBuilder {
             metrics_recorder,
             evm_network: self.evm_network,
         };
+
         let node = Node {
             inner: Arc::new(node),
         };
+
+        // Create a shutdown signal channel
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        // Run the node
+        let (swarm_driver_task, node_task) =
+            node.run(swarm_driver, network_event_receiver, shutdown_rx);
+
         let running_node = RunningNode {
+            shutdown_tx,
             network,
             node_events_channel,
             root_dir_path: self.root_dir,
             rewards_address: self.evm_address,
+            swarm_driver_task,
+            node_task,
         };
-
-        // Run the node
-        node.run(swarm_driver, network_event_receiver);
 
         Ok(running_node)
     }
@@ -271,14 +283,20 @@ impl Node {
         &self.inner.evm_network
     }
 
-    /// Runs the provided `SwarmDriver` and spawns a task to process for `NetworkEvents`
-    fn run(self, swarm_driver: SwarmDriver, mut network_event_receiver: Receiver<NetworkEvent>) {
+    /// Runs a task for the provided `SwarmDriver` and spawns a task to process for `NetworkEvents`.
+    /// Returns both tasks as JoinHandle<()>.
+    fn run(
+        self,
+        swarm_driver: SwarmDriver,
+        mut network_event_receiver: Receiver<NetworkEvent>,
+        mut shutdown_rx: watch::Receiver<bool>,
+    ) -> (JoinHandle<()>, JoinHandle<()>) {
         let mut rng = StdRng::from_entropy();
 
         let peers_connected = Arc::new(AtomicUsize::new(0));
 
-        let _handle = spawn(swarm_driver.run());
-        let _handle = spawn(async move {
+        let swarm_driver_task = spawn(swarm_driver.run(shutdown_rx.clone()));
+        let node_task = spawn(async move {
             // use a random inactivity timeout to ensure that the nodes do not sync when messages
             // are being transmitted.
             let replication_interval: u64 = rng.gen_range(
@@ -329,6 +347,13 @@ impl Node {
                 let peers_connected = &peers_connected;
 
                 tokio::select! {
+                    // Check shutdown signal
+                    _ = shutdown_rx.changed() => {
+                        if *shutdown_rx.borrow() {
+                            info!("Shutting down node loop.");
+                            break;
+                        }
+                    },
                     net_event = network_event_receiver.recv() => {
                         match net_event {
                             Some(event) => {
@@ -399,6 +424,8 @@ impl Node {
                 }
             }
         });
+
+        (swarm_driver_task, node_task)
     }
 
     /// Calls Marker::log() to insert the marker into the log files.

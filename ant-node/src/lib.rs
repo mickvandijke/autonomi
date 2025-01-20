@@ -53,15 +53,19 @@ use std::{
     collections::{BTreeMap, HashSet},
     path::PathBuf,
 };
+use tokio::join;
+use tokio::task::JoinHandle;
 
 /// Once a node is started and running, the user obtains
 /// a `NodeRunning` object which can be used to interact with it.
-#[derive(Clone)]
 pub struct RunningNode {
+    shutdown_tx: tokio::sync::watch::Sender<bool>,
     network: Network,
     node_events_channel: NodeEventsChannel,
     root_dir_path: PathBuf,
     rewards_address: RewardsAddress,
+    swarm_driver_task: JoinHandle<()>,
+    node_task: JoinHandle<()>,
 }
 
 impl RunningNode {
@@ -133,5 +137,14 @@ impl RunningNode {
     /// Returns the node's reward address
     pub fn reward_address(&self) -> &RewardsAddress {
         &self.rewards_address
+    }
+
+    /// Shutdown the SwarmDriver loop and the node (NetworkEvents) loop.
+    pub async fn shutdown(self) {
+        // Send the shutdown signal to the swarm driver and node loop
+        let _ = self.shutdown_tx.send(true);
+
+        // Wait for the tasks to finish
+        let _ = join!(self.swarm_driver_task, self.node_task);
     }
 }

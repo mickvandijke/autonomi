@@ -71,7 +71,7 @@ use std::{
     num::NonZeroUsize,
     path::PathBuf,
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Duration;
 use tracing::warn;
 use xor_name::XorName;
@@ -878,7 +878,7 @@ impl SwarmDriver {
     /// The `tokio::select` macro is used to concurrently process swarm events
     /// and command receiver messages, ensuring efficient handling of multiple
     /// asynchronous tasks.
-    pub async fn run(mut self) {
+    pub async fn run(mut self, mut shutdown_rx: watch::Receiver<bool>) {
         let mut network_discover_interval = interval(NETWORK_DISCOVER_INTERVAL);
         let mut set_farthest_record_interval = interval(CLOSET_RECORD_CHECK_INTERVAL);
         let mut relay_manager_reservation_interval = interval(RELAY_MANAGER_RESERVATION_INTERVAL);
@@ -908,9 +908,17 @@ impl SwarmDriver {
                 // polls futures in order they appear here (as opposed to random)
                 biased;
 
+                // Check shutdown signal
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        info!("Shutting down swarm driver.");
+                        break;
+                    }
+                },
                 // Prioritise any local cmds pending.
                 // https://github.com/libp2p/rust-libp2p/blob/master/docs/coding-guidelines.md#prioritize-local-work-over-new-work-from-a-remote
                 local_cmd = self.local_cmd_receiver.recv() => match local_cmd {
+                    Some(LocalSwarmCmd::AddLocalRecordAsStored { .. }) => {}
                     Some(cmd) => {
                         let start = Instant::now();
                         let cmd_string = format!("{cmd:?}");

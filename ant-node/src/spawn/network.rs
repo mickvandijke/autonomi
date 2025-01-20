@@ -6,15 +6,32 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
 pub struct NetworkSpawner {
+    /// The EVM network to which the spawned nodes will connect.
     evm_network: EvmNetwork,
+    /// The address that will receive rewards from the spawned nodes.
     rewards_address: RewardsAddress,
+    /// Specifies whether the network will operate in local mode and sets the listen address.
+    /// - `true`: Nodes listen on the local loopback address (`127.0.0.1`).
+    /// - `false`: Nodes listen on all available interfaces (`0.0.0.0`).
     local: bool,
+    /// Enables or disables UPnP (automatic port forwarding).
     upnp: bool,
+    /// Optional root directory to store node data and configurations.
     root_dir: Option<PathBuf>,
+    /// Number of nodes to spawn in the network.
     size: usize,
 }
 
 impl NetworkSpawner {
+    /// Creates a new `NetworkSpawner` with default configurations.
+    ///
+    /// Default values:
+    /// - `evm_network`: `EvmNetwork::default()`
+    /// - `rewards_address`: `RewardsAddress::default()`
+    /// - `local`: `false`
+    /// - `upnp`: `false`
+    /// - `root_dir`: `None`
+    /// - `size`: `5`
     pub fn new() -> Self {
         Self {
             evm_network: Default::default(),
@@ -26,43 +43,74 @@ impl NetworkSpawner {
         }
     }
 
-    /// Sets the EVM network.
+    /// Sets the EVM network to be used by the nodes.
+    ///
+    /// # Arguments
+    ///
+    /// * `evm_network` - The target `EvmNetwork` for the nodes.
     pub fn with_evm_network(mut self, evm_network: EvmNetwork) -> Self {
         self.evm_network = evm_network;
         self
     }
 
-    /// Sets the rewards address.
+    /// Sets the rewards address for the nodes.
+    ///
+    /// # Arguments
+    ///
+    /// * `rewards_address` - A valid `RewardsAddress` to collect rewards.
     pub fn with_rewards_address(mut self, rewards_address: RewardsAddress) -> Self {
         self.rewards_address = rewards_address;
         self
     }
 
-    /// Sets the local mode value.
+    /// Configures the local mode for the network.
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - If set to `true`, nodes will operate in local mode and listen only on `127.0.0.1`.
+    ///   Otherwise, they listen on all interfaces (`0.0.0.0`).
     pub fn with_local(mut self, value: bool) -> Self {
         self.local = value;
         self
     }
 
-    /// Sets the UPnP value (automatic port forwarding).
+    /// Enables or disables UPnP for the nodes.
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - If `true`, nodes will attempt automatic port forwarding using UPnP.
     pub fn with_upnp(mut self, value: bool) -> Self {
         self.upnp = value;
         self
     }
 
     /// Sets the root directory for the nodes.
+    ///
+    /// # Arguments
+    ///
+    /// * `root_dir` - An optional file path where nodes will store their data.
     pub fn with_root_dir(mut self, root_dir: Option<PathBuf>) -> Self {
         self.root_dir = root_dir;
         self
     }
 
-    /// Sets the amount of nodes spawned in the network.
+    /// Specifies the number of nodes to spawn in the network.
+    ///
+    /// # Arguments
+    ///
+    /// * `size` - The number of nodes to create. Default is 5.
     pub fn with_size(mut self, size: usize) -> Self {
         self.size = size;
         self
     }
 
-    pub async fn spawn(self) -> eyre::Result<SpawnedNetwork> {
+    /// Spawns the network with the configured parameters.
+    ///
+    /// # Returns
+    ///
+    /// A future resolving to a `SpawnedNetwork` containing the running nodes,
+    /// or an error if the spawning process fails.
+    pub async fn spawn(self) -> eyre::Result<RunningNetwork> {
         spawn_network(
             self.evm_network,
             self.rewards_address,
@@ -81,13 +129,21 @@ impl Default for NetworkSpawner {
     }
 }
 
-pub struct SpawnedNetwork {
+pub struct RunningNetwork {
     running_nodes: Vec<RunningNode>,
 }
 
-impl SpawnedNetwork {
+impl RunningNetwork {
+    /// Return all running nodes.
     pub fn running_nodes(&self) -> &Vec<RunningNode> {
         &self.running_nodes
+    }
+
+    /// Shutdown all running nodes.
+    pub async fn shutdown(self) {
+        for node in self.running_nodes.into_iter() {
+            node.shutdown().await;
+        }
     }
 }
 
@@ -98,7 +154,7 @@ async fn spawn_network(
     upnp: bool,
     root_dir: Option<PathBuf>,
     size: usize,
-) -> eyre::Result<SpawnedNetwork> {
+) -> eyre::Result<RunningNetwork> {
     let mut running_nodes: Vec<RunningNode> = vec![];
 
     for i in 0..size {
@@ -139,7 +195,7 @@ async fn spawn_network(
         running_nodes.push(node);
     }
 
-    Ok(SpawnedNetwork { running_nodes })
+    Ok(RunningNetwork { running_nodes })
 }
 
 #[cfg(test)]
@@ -152,22 +208,24 @@ mod tests {
         // start local Ethereum node
         let evm_testnet = EvmTestnet::new().await;
         let evm_network = evm_testnet.to_network();
-        let network_size = 20;
+        let network_size = 25;
 
-        let spawned_network = NetworkSpawner::new()
+        let running_network = NetworkSpawner::new()
             .with_evm_network(evm_network)
             .with_size(network_size)
             .spawn()
             .await
             .unwrap();
 
-        assert_eq!(spawned_network.running_nodes().len(), network_size);
+        assert_eq!(running_network.running_nodes().len(), network_size);
 
         // Validate each node's listen addresses are not empty
-        for node in spawned_network.running_nodes() {
+        for node in running_network.running_nodes() {
             let listen_addrs = node.get_listen_addrs().await.unwrap();
 
             assert!(!listen_addrs.is_empty());
         }
+
+        running_network.shutdown().await;
     }
 }

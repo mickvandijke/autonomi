@@ -6,16 +6,24 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
 pub struct NodeSpawner {
+    /// The socket address where the node will listen.
     socket_addr: SocketAddr,
+    /// The EVM network the node will connect to.
     evm_network: EvmNetwork,
+    /// The rewards address used for receiving rewards.
     rewards_address: RewardsAddress,
+    /// A vector of `Multiaddr` representing the initial peers.
     initial_peers: Vec<Multiaddr>,
+    /// A boolean indicating whether the node should run in local mode.
     local: bool,
+    /// A boolean indicating whether UPnP should be enabled.
     upnp: bool,
+    /// An optional `PathBuf` representing the root directory for the node.
     root_dir: Option<PathBuf>,
 }
 
 impl NodeSpawner {
+    /// Create a new instance of `NodeSpawner` with default values.
     pub fn new() -> Self {
         Self {
             socket_addr: SocketAddr::new(IpAddr::from(Ipv4Addr::UNSPECIFIED), 0),
@@ -98,6 +106,11 @@ impl NodeSpawner {
         self
     }
 
+    /// Spawn the node using the configured parameters.
+    ///
+    /// # Returns
+    ///
+    /// An `eyre::Result` containing a `RunningNode` if successful, or an error.
     pub async fn spawn(self) -> eyre::Result<RunningNode> {
         spawn_node(
             self.socket_addr,
@@ -179,14 +192,16 @@ mod tests {
     async fn test_launch_node() {
         let evm_network = EvmNetwork::ArbitrumSepolia;
 
-        let node = NodeSpawner::new()
+        let running_node = NodeSpawner::new()
             .with_evm_network(evm_network)
             .spawn()
             .await
             .unwrap();
 
-        let listen_addrs = node.get_listen_addrs().await.unwrap();
+        let listen_addrs = running_node.get_listen_addrs().await.unwrap();
 
         assert!(!listen_addrs.is_empty());
+
+        running_node.shutdown().await;
     }
 }
