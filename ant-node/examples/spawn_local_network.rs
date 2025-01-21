@@ -1,4 +1,3 @@
-use ant_evm::EvmTestnet;
 use ant_node::spawn::network::NetworkSpawner;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -13,13 +12,10 @@ async fn main() {
         .with(EnvFilter::from_env("RUST_LOG"))
         .init();
 
-    // start local Ethereum node
-    let evm_testnet = EvmTestnet::new().await;
-    let evm_network = evm_testnet.to_network();
-    let network_size = 2;
+    let network_size = 20;
 
     let running_network = NetworkSpawner::new()
-        .with_evm_network(evm_network)
+        .with_evm_network(Default::default())
         .with_local(true)
         .with_size(network_size)
         .spawn()
@@ -28,23 +24,14 @@ async fn main() {
 
     assert_eq!(running_network.running_nodes().len(), network_size);
 
-    // Validate each node's listen addresses are not empty
-    for node in running_network.running_nodes() {
-        let listen_addrs = node.get_listen_addrs().await.unwrap();
-
-        assert!(!listen_addrs.is_empty());
-    }
-
     // Wait for nodes to dial each other
-    sleep(Duration::from_secs(20)).await;
+    sleep(Duration::from_secs(10)).await;
 
-    // TODO: Validate that all nodes know each other
+    // Validate that all nodes know each other
     for node in running_network.running_nodes() {
         let known_peers = node.get_swarm_local_state().await.unwrap().connected_peers;
 
-        println!("Known peers: {known_peers:?}");
-
-        // TODO: nodes do not know each other..
+        assert_eq!(known_peers.len(), network_size - 1);
     }
 
     running_network.shutdown();
