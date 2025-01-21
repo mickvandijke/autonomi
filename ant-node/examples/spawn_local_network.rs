@@ -20,7 +20,7 @@ async fn main() {
         .with_size(network_size)
         .spawn()
         .await
-        .unwrap();
+        .expect("Failed to spawn network");
 
     assert_eq!(running_network.running_nodes().len(), network_size);
 
@@ -29,7 +29,11 @@ async fn main() {
 
     // Validate that all nodes know each other
     for node in running_network.running_nodes() {
-        let known_peers = node.get_swarm_local_state().await.unwrap().connected_peers;
+        let known_peers = node
+            .get_swarm_local_state()
+            .await
+            .expect("Failed to get swarm local state")
+            .connected_peers;
 
         assert_eq!(known_peers.len(), network_size - 1);
     }
