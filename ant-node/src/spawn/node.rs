@@ -187,6 +187,8 @@ async fn spawn_node(
 mod tests {
     use super::*;
     use ant_evm::EvmNetwork;
+    use futures::StreamExt;
+    use libp2p::swarm::dummy;
 
     #[tokio::test]
     async fn test_launch_node() {
@@ -194,6 +196,7 @@ mod tests {
 
         let running_node = NodeSpawner::new()
             .with_evm_network(evm_network)
+            .with_local(true)
             .spawn()
             .await
             .unwrap();
@@ -201,6 +204,21 @@ mod tests {
         let listen_addrs = running_node.get_listen_addrs().await.unwrap();
 
         assert!(!listen_addrs.is_empty());
+
+        let mut swarm = libp2p::SwarmBuilder::with_new_identity()
+            .with_tokio()
+            .with_quic()
+            .with_behaviour(|_| dummy::Behaviour)
+            .unwrap()
+            .build();
+
+        let address = listen_addrs.first().unwrap().clone();
+
+        assert!(swarm.dial(address).is_ok());
+        assert!(matches!(
+            swarm.next().await,
+            Some(libp2p::swarm::SwarmEvent::ConnectionEstablished { .. })
+        ));
 
         running_node.shutdown();
     }
