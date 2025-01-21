@@ -193,7 +193,6 @@ impl NodeBuilder {
         let node_events_channel = NodeEventsChannel::default();
 
         let node = NodeInner {
-            local: self.local,
             network: network.clone(),
             events_channel: node_events_channel.clone(),
             initial_peers: self.initial_peers,
@@ -236,7 +235,6 @@ pub(crate) struct Node {
 /// The actual implementation of the Node. The other is just a wrapper around this, so that we don't expose
 /// the Arc from the interface.
 struct NodeInner {
-    local: bool,
     events_channel: NodeEventsChannel,
     // Peers that are dialed at startup of node.
     initial_peers: Vec<Multiaddr>,
@@ -478,17 +476,15 @@ impl Node {
             }
             NetworkEvent::NewListenAddr(_) => {
                 event_header = "NewListenAddr";
-                if !self.inner.local {
-                    let network = self.network().clone();
-                    let peers = self.initial_peers().clone();
-                    let _handle = spawn(async move {
-                        for addr in peers {
-                            if let Err(err) = network.dial(addr.clone()).await {
-                                tracing::error!("Failed to dial {addr}: {err:?}");
-                            };
-                        }
-                    });
-                }
+                let network = self.network().clone();
+                let peers = self.initial_peers().clone();
+                let _handle = spawn(async move {
+                    for addr in peers {
+                        if let Err(err) = network.dial(addr.clone()).await {
+                            tracing::error!("Failed to dial {addr}: {err:?}");
+                        };
+                    }
+                });
             }
             NetworkEvent::ResponseReceived { res } => {
                 event_header = "ResponseReceived";
