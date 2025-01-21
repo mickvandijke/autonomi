@@ -140,9 +140,9 @@ impl RunningNetwork {
     }
 
     /// Shutdown all running nodes.
-    pub async fn shutdown(self) {
+    pub fn shutdown(self) {
         for node in self.running_nodes.into_iter() {
-            node.shutdown().await;
+            node.shutdown();
         }
     }
 }
@@ -211,7 +211,7 @@ mod tests {
     use std::time::Duration;
     use tokio::time::sleep;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_spawn_network() {
         // start local Ethereum node
         let evm_testnet = EvmTestnet::new().await;
@@ -251,6 +251,6 @@ mod tests {
             // TODO: nodes do not know each other..
         }
 
-        running_network.shutdown().await;
+        running_network.shutdown();
     }
 }

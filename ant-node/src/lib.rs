@@ -139,7 +139,7 @@ impl RunningNode {
     }
 
     /// Shutdown the SwarmDriver loop and the node (NetworkEvents) loop.
-    pub async fn shutdown(self) {
+    pub fn shutdown(self) {
         // Send the shutdown signal to the swarm driver and node loop
         let _ = self.shutdown_sender.send(true);
     }

@@ -202,6 +202,6 @@ mod tests {
 
         assert!(!listen_addrs.is_empty());
 
-        running_node.shutdown().await;
+        running_node.shutdown();
     }
 }
