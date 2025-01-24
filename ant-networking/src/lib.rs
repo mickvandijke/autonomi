@@ -371,25 +371,23 @@ impl Network {
         ))
     }
 
-    /// Get the store costs from the majority of the closest peers to the provided RecordKey.
-    /// Record already exists will have a cost of zero to be returned.
-    ///
-    /// Ignore the quote from any peers from `ignore_peers`.
-    /// This is useful if we want to repay a different PeerId on failure.
-    pub async fn get_store_quote_from_network(
+    /// Get the raw quotes responses for a record from nodes inside the closest group.
+    pub async fn get_raw_quote_responses_from_nodes(
         &self,
-        record_address: NetworkAddress,
+        record_address: &NetworkAddress,
         data_type: u32,
         data_size: usize,
         ignore_peers: Vec<PeerId>,
-    ) -> Result<Vec<(PeerId, PaymentQuote)>> {
+    ) -> Result<BTreeMap<PeerId, Result<Response>>> {
         // The requirement of having at least CLOSE_GROUP_SIZE
         // close nodes will be checked internally automatically.
         let mut close_nodes = self
-            .client_get_all_close_peers_in_range_or_close_group(&record_address)
+            .client_get_all_close_peers_in_range_or_close_group(record_address)
             .await?;
+
         // Filter out results from the ignored peers.
         close_nodes.retain(|peer_id| !ignore_peers.contains(peer_id));
+
         info!(
             "For record {record_address:?} quoting {} nodes. ignore_peers is {ignore_peers:?}",
             close_nodes.len()
@@ -408,13 +406,31 @@ impl Network {
             nonce: None,
             difficulty: 0,
         });
-        let responses = self
+
+        Ok(self
             .send_and_get_responses(&close_nodes, &request, true)
-            .await;
+            .await)
+    }
+
+    /// Get the store costs from the majority of the closest peers to the provided RecordKey.
+    /// Record already exists will have a cost of zero to be returned.
+    ///
+    /// Ignore the quote from any peers from `ignore_peers`.
+    /// This is useful if we want to repay a different PeerId on failure.
+    pub async fn get_store_quote_from_network(
+        &self,
+        record_address: NetworkAddress,
+        data_type: u32,
+        data_size: usize,
+        ignore_peers: Vec<PeerId>,
+    ) -> Result<Vec<(PeerId, PaymentQuote)>> {
+        let responses = self
+            .get_raw_quote_responses_from_nodes(&record_address, data_type, data_size, ignore_peers)
+            .await?;
 
         // consider data to be already paid for if 1/2 of the close nodes already have it
         let mut peer_already_have_it = 0;
-        let enough_peers_already_have_it = close_nodes.len() / 2;
+        let enough_peers_already_have_it = CLOSE_GROUP_SIZE / 2 + 1;
 
         let mut peers_returned_error = 0;
 

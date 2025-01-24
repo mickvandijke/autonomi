@@ -142,6 +142,19 @@ pub struct RunningNetwork {
 }
 
 impl RunningNetwork {
+    /// Returns a bootstrap peer from this network.
+    pub async fn bootstrap_peer(&self) -> Multiaddr {
+        self.running_nodes()
+            .first()
+            .expect("No nodes running, cannot get bootstrap peer")
+            .get_listen_addrs_with_peer_id()
+            .await
+            .expect("Could not get listen addresses for bootstrap peer")
+            .last()
+            .expect("Bootstrap peer has no listen addresses")
+            .clone()
+    }
+
     /// Return all running nodes.
     pub fn running_nodes(&self) -> &Vec<RunningNode> {
         &self.running_nodes
