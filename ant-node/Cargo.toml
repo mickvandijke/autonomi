@@ -9,6 +9,11 @@ homepage = "https://maidsafe.net"
 readme = "README.md"
 repository = "https://github.com/maidsafe/autonomi"
 
+[lib]
+name = "antnode"
+# "cdylib" is necessary to produce a shared library for Python to import from.
+crate-type = ["cdylib"]
+
 [[bin]]
 name = "antnode"
 path = "src/bin/antnode/main.rs"
@@ -50,7 +55,7 @@ prometheus-client = { version = "0.22", optional = true }
 # watch out updating this, protoc compiler needs to be installed on all build systems
 # arm builds + musl are very problematic
 prost = { version = "0.9" }
-pyo3 = { version = "0.20", features = ["extension-module"], optional = true }
+pyo3 = { version = "0.23.4", features = ["extension-module"], optional = true }
 rand = { version = "~0.8.5", features = ["small_rng"] }
 rmp-serde = "1.1.1"
 rayon = "1.8.0"

@@ -16,6 +16,6 @@ Example:
     ... )
 """
 
-from ._antnode import AntNode
+from .antnode import AntNode
 
 __all__ = ["AntNode"]

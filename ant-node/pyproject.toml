@@ -7,6 +7,11 @@ name = "antnode"
 dynamic = ["version"]
 description = "The Autonomi node binary"
 requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: Implementation :: PyPy",
+]
 dependencies = [
     "maturin>=1.7.4",
     "pip>=24.3.1",
@@ -14,7 +19,7 @@ dependencies = [
 
 [tool.maturin]
 features = ["extension-module"]
-module-name = "antnode._antnode"
+module-name = "antnode"
 python-source = "python"
 bindings = "pyo3"
 manifest-path = "Cargo.toml"

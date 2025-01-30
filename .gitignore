@@ -32,7 +32,8 @@ metrics/prometheus/prometheus.yml
 
 ant-node-manager/.vagrant
 
-# Python 
+# Python
+.env/
 .venv/
 uv.lock
 *.so

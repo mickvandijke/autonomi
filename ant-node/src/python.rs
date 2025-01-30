@@ -20,8 +20,8 @@ use std::{
 use tokio::sync::Mutex;
 use xor_name::XorName;
 
-/// Python wrapper for the Safe Network Node
-#[pyclass(name = "SafeNode")]
+/// Python wrapper for the Autonomi Network Node
+#[pyclass(name = "AntNode")]
 pub struct AntNode {
     node: Arc<Mutex<Option<RunningNode>>>,
     runtime: Arc<Mutex<Option<tokio::runtime::Runtime>>>,
@@ -466,8 +466,7 @@ impl AntNode {
 
 /// Python module initialization
 #[pymodule]
-#[pyo3(name = "_antnode")]
-fn init_module(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
+fn antnode(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_class::<AntNode>()?;
     Ok(())
 }
