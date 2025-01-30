@@ -7,9 +7,8 @@
 // permissions and limitations relating to use of the SAFE Network Software.
 
 use super::Client;
-use crate::client::rate_limiter::RateLimiter;
 use ant_evm::payment_vault::get_market_price;
-use ant_evm::{Amount, EvmNetwork, PaymentQuote, QuotePayment, QuotingMetrics};
+use ant_evm::{Amount, PaymentQuote, QuotePayment, QuotingMetrics};
 use ant_networking::{Network, NetworkError};
 use ant_protocol::{storage::ChunkAddress, NetworkAddress, CLOSE_GROUP_SIZE};
 use libp2p::PeerId;
@@ -95,8 +94,6 @@ impl Client {
         // choose the quotes to pay for each address
         let mut quotes_to_pay_per_addr = HashMap::new();
 
-        let mut rate_limiter = RateLimiter::new();
-
         for (content_addr, raw_quotes) in raw_quotes_per_addr {
             debug!(
                 "fetching market price for content_addr: {content_addr}, with {} quotes.",
@@ -117,12 +114,7 @@ impl Client {
                 .map(|(_, q)| q.quoting_metrics.clone())
                 .collect();
 
-            let all_prices = get_market_price_with_rate_limiter_and_retries(
-                &self.evm_network,
-                &mut rate_limiter,
-                quoting_metrics.clone(),
-            )
-            .await?;
+            let all_prices = get_market_price(&self.evm_network, quoting_metrics.clone()).await?;
 
             debug!("market prices: {all_prices:?}");
 
@@ -225,38 +217,5 @@ async fn fetch_store_quote_with_retries(
         // Shall have a sleep between retries to avoid choking the network.
         // This shall be rare to happen though.
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-    }
-}
-
-async fn get_market_price_with_rate_limiter_and_retries(
-    evm_network: &EvmNetwork,
-    rate_limiter: &mut RateLimiter,
-    quoting_metrics: Vec<QuotingMetrics>,
-) -> Result<Vec<Amount>, ant_evm::payment_vault::error::Error> {
-    const MAX_RETRIES: u64 = 2;
-    let mut retries: u64 = 0;
-    let mut interval_in_ms: u64 = 1000;
-
-    loop {
-        rate_limiter
-            .wait_interval_since_last_request(interval_in_ms)
-            .await;
-
-        match get_market_price(evm_network, quoting_metrics.clone()).await {
-            Ok(amounts) => {
-                break Ok(amounts);
-            }
-            Err(err) => {
-                if retries < MAX_RETRIES {
-                    retries += 1;
-                    interval_in_ms *= retries * 2;
-                    error!("Error while fetching quote market price: {err:?}, retry #{retries}");
-                    continue;
-                } else {
-                    error!("Error while fetching quote market price: {err:?}, stopping after {retries} retries");
-                    break Err(err);
-                }
-            }
-        }
     }
 }
