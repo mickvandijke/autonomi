@@ -18,11 +18,18 @@ use super::archive_private::{PrivateArchive, PrivateArchiveAccess};
 use super::{get_relative_file_path_from_abs_file_and_folder_path, FILE_UPLOAD_BATCH_SIZE};
 use super::{DownloadError, UploadError};
 
-use crate::client::Client;
-use crate::client::{data_types::chunk::DataMapChunk, utils::process_tasks_with_max_concurrency};
-use ant_evm::EvmWallet;
+use crate::client::payment::PaymentOption;
+use crate::client::{
+    data_types::chunk::DataMapChunk, utils::process_tasks_with_max_concurrency, ClientEvent,
+    UploadSummary,
+};
+use crate::client::{Client, PutError};
+use crate::self_encryption::encrypt;
+use ant_evm::{Amount, EvmWallet};
+use ant_protocol::storage::{Chunk, DataTypes};
 use bytes::Bytes;
 use std::path::PathBuf;
+use xor_name::XorName;
 
 impl Client {
     /// Download a private file from network to local file system
@@ -60,51 +67,141 @@ impl Client {
     pub async fn dir_upload(
         &self,
         dir_path: PathBuf,
-        wallet: &EvmWallet,
+        payment_option: PaymentOption,
     ) -> Result<PrivateArchive, UploadError> {
         info!("Uploading directory as private: {dir_path:?}");
         let start = tokio::time::Instant::now();
 
-        // start upload of file in parallel
-        let mut upload_tasks = Vec::new();
-        for entry in walkdir::WalkDir::new(dir_path.clone()) {
+        let mut combined_xor_names: Vec<(XorName, usize)> = vec![];
+        let mut combined_chunks: Vec<(String, Vec<Chunk>)> = vec![];
+        let mut private_archive = PrivateArchive::new();
+
+        for entry in walkdir::WalkDir::new(&dir_path) {
             let entry = entry?;
-            if !entry.file_type().is_file() {
+
+            if entry.file_type().is_dir() {
                 continue;
             }
 
+            let file_path = entry.path().to_path_buf();
+            let data = tokio::fs::read(&file_path).await?;
+            let data = Bytes::from(data);
+
+            if data.len() < 3 {
+                warn!("Skipping file {file_path:?}, as it is smaller than 3 bytes");
+                continue;
+            }
+
+            let now = ant_networking::time::Instant::now();
+
+            let (data_map_chunk, chunks) = encrypt(data).map_err(PutError::from)?;
+
+            debug!("Encryption took: {:.2?}", now.elapsed());
+
+            let xor_names: Vec<_> = chunks
+                .iter()
+                .map(|chunk| (*chunk.name(), chunk.serialised_size()))
+                .collect();
+
             let metadata = super::fs_public::metadata_from_entry(&entry);
-            let path = entry.path().to_path_buf();
+
+            combined_xor_names.extend(xor_names);
+
+            combined_chunks.push((file_path.to_string_lossy().to_string(), chunks));
+
+            let relative_path =
+                get_relative_file_path_from_abs_file_and_folder_path(&file_path, &dir_path);
+
+            private_archive.add_file(relative_path, DataMapChunk::from(data_map_chunk), metadata);
+        }
+
+        info!("Paying for {} chunks", combined_xor_names.len());
+
+        let (receipt, skipped_payments_amount) = self
+            .pay_for_content_addrs(
+                DataTypes::Chunk,
+                combined_xor_names.into_iter(),
+                payment_option,
+            )
+            .await
+            .inspect_err(|err| error!("Error paying for data: {err:?}"))
+            .map_err(PutError::from)?;
+
+        info!("{skipped_payments_amount} chunks were free");
+
+        let files_to_upload_amount = combined_chunks.len();
+
+        let mut upload_tasks = vec![];
+
+        // todo: parallelize this
+        for (name, chunks) in combined_chunks {
             upload_tasks.push(async move {
-                let file = self.file_upload(path.clone(), wallet).await;
-                (path, metadata, file)
+                info!("Uploading file: {name} ({} chunks)..", chunks.len());
+
+                #[cfg(feature = "loud")]
+                println!("Uploading file: {name} ({} chunks)..", chunks.len());
+
+                // todo: handle failed uploads
+                let mut failed_uploads = self
+                    .upload_chunks_with_retries(chunks.iter().collect(), &receipt)
+                    .await;
+
+                let chunks_uploaded = chunks.len() - failed_uploads.len();
+
+                // Return the last chunk upload error
+                if let Some(last_chunk_fail) = failed_uploads.pop() {
+                    error!(
+                        "Error uploading chunk ({:?}): {:?}",
+                        last_chunk_fail.0.address(),
+                        last_chunk_fail.1
+                    );
+
+                    (name, Err(UploadError::from(last_chunk_fail.1)))
+                } else {
+                    info!("Successfully uploaded {name} ({} chunks)", chunks.len());
+
+                    #[cfg(feature = "loud")]
+                    println!("Successfully uploaded {name} ({} chunks)", chunks.len());
+
+                    (name, Ok(chunks_uploaded))
+                }
             });
         }
 
-        // wait for all files to be uploaded
         let uploads =
             process_tasks_with_max_concurrency(upload_tasks, *FILE_UPLOAD_BATCH_SIZE).await;
+
         info!(
             "Upload of {} files completed in {:?}",
-            uploads.len(),
+            files_to_upload_amount,
             start.elapsed()
         );
-        let mut archive = PrivateArchive::new();
-        for (path, metadata, maybe_file) in uploads.into_iter() {
-            let rel_path = get_relative_file_path_from_abs_file_and_folder_path(&path, &dir_path);
 
-            match maybe_file {
-                Ok(file) => archive.add_file(rel_path, file, metadata),
-                Err(err) => {
-                    error!("Failed to upload file: {path:?}: {err:?}");
-                    return Err(err);
-                }
+        #[cfg(feature = "loud")]
+        println!(
+            "Upload of {} files completed in {:?}",
+            files_to_upload_amount,
+            start.elapsed()
+        );
+
+        // Reporting
+        if let Some(channel) = self.client_event_sender.as_ref() {
+            let tokens_spent = receipt
+                .values()
+                .map(|(_, cost)| cost.as_atto())
+                .sum::<Amount>();
+
+            let summary = UploadSummary {
+                records_paid: chunks_uploaded.saturating_sub(skipped_payments_amount),
+                records_already_paid: skipped_payments_amount,
+                tokens_spent,
+            };
+            if let Err(err) = channel.send(ClientEvent::UploadComplete(summary)).await {
+                error!("Failed to send client event: {err:?}");
             }
         }
 
-        #[cfg(feature = "loud")]
-        println!("Upload completed in {:?}", start.elapsed());
-        Ok(archive)
+        Ok(private_archive)
     }
 
     /// Same as [`Client::dir_upload`] but also uploads the archive (privately) to the network.
@@ -115,7 +212,7 @@ impl Client {
         dir_path: PathBuf,
         wallet: &EvmWallet,
     ) -> Result<PrivateArchiveAccess, UploadError> {
-        let archive = self.dir_upload(dir_path, wallet).await?;
+        let archive = self.dir_upload(dir_path, wallet.into()).await?;
         let archive_addr = self.archive_put(&archive, wallet.into()).await?;
         Ok(archive_addr)
     }
