@@ -487,10 +487,15 @@ fn monitor_node_events(mut node_events_rx: NodeEventsReceiver, ctrl_tx: mpsc::Se
                     }
                 }
                 Ok(NodeEvent::TerminateNode(reason)) => {
+                    let result = match reason {
+                        Ok(msg) => StopResult::Success(format!("Node terminated due to: {msg:?}")),
+                        Err(msg) => StopResult::Error(eyre!("Node terminated due to: {msg:?}")),
+                    };
+
                     if let Err(err) = ctrl_tx
                         .send(NodeCtrl::Stop {
                             delay: Duration::from_secs(1),
-                            result: StopResult::Error(eyre!("Node terminated due to: {reason:?}")),
+                            result,
                         })
                         .await
                     {

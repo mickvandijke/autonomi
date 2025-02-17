@@ -155,6 +155,15 @@ pub enum TerminateNodeReason {
     UpnpGatewayNotFound,
 }
 
+impl From<TerminateNodeReason> for Result<String, String> {
+    fn from(reason: TerminateNodeReason) -> Self {
+        match reason {
+            TerminateNodeReason::HardDiskWriteError => Err("Hard disk write error".to_string()),
+            TerminateNodeReason::UpnpGatewayNotFound => Ok("Upnp gateway not found".to_string()),
+        }
+    }
+}
+
 // Manually implement Debug as `#[debug(with = "unverified_record_fmt")]` not working as expected.
 impl Debug for NetworkEvent {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
