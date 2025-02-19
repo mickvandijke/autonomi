@@ -69,6 +69,7 @@ impl ServiceStateActions for AuditorService<'_> {
             program: self.service_data.auditor_path.to_path_buf(),
             username: Some(self.service_data.user.to_string()),
             working_directory: None,
+            disable_restart_on_failure: false,
         })
     }
 

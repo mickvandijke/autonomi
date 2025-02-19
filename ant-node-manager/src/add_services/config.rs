@@ -166,6 +166,7 @@ impl InstallNodeServiceCtxBuilder {
             program: self.antnode_path.to_path_buf(),
             username: self.service_user.clone(),
             working_directory: None,
+            disable_restart_on_failure: true,
         })
     }
 }
@@ -231,6 +232,7 @@ impl InstallAuditorServiceCtxBuilder {
             program: self.auditor_path.to_path_buf(),
             username: Some(self.service_user.to_string()),
             working_directory: None,
+            disable_restart_on_failure: false,
         })
     }
 }
@@ -263,6 +265,7 @@ impl InstallFaucetServiceCtxBuilder {
             program: self.faucet_path.to_path_buf(),
             username: Some(self.service_user.to_string()),
             working_directory: None,
+            disable_restart_on_failure: false,
         })
     }
 }

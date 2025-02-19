@@ -429,6 +429,7 @@ pub fn add_daemon(
         program: options.daemon_install_bin_path.clone(),
         username: Some(options.user),
         working_directory: None,
+        disable_restart_on_failure: false,
     };
 
     match service_control.install(install_ctx, false) {

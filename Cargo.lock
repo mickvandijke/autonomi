@@ -2253,6 +2253,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cbd0f76e066e64fdc5631e3bb46381254deab9ef1158292f27c8c57e3bf3fe59"
 
 [[package]]
+name = "codepage"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "48f68d061bc2828ae826206326e61251aca94c1e4a5305cf52d9138639c918b4"
+dependencies = [
+ "encoding_rs",
+]
+
+[[package]]
 name = "color-eyre"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3082,6 +3091,17 @@ name = "encode_unicode"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
+
+[[package]]
+name = "encoding-utils"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "87b881ab2524b96a5ce932056c7482ba6152e2226fed3936b3e592adeb95ca6d"
+dependencies = [
+ "codepage",
+ "encoding_rs",
+ "windows-sys 0.52.0",
+]
 
 [[package]]
 name = "encoding_rs"
@@ -8332,11 +8352,12 @@ dependencies = [
 [[package]]
 name = "service-manager"
 version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59d7d62c9733631445d1b3fc7854c780088408d4b79a20dd928aaec41854ca3a"
+source = "git+https://github.com/mickvandijke/service-manager-rs?rev=bcdde8cbdfd27a8e6b1773a22eb8df76cb0fbd22#bcdde8cbdfd27a8e6b1773a22eb8df76cb0fbd22"
 dependencies = [
  "cfg-if",
  "dirs",
+ "encoding-utils",
+ "encoding_rs",
  "plist",
  "which 4.4.2",
  "xml-rs",

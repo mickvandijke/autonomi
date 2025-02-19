@@ -138,6 +138,7 @@ impl ServiceStateActions for NodeService<'_> {
             program: self.service_data.antnode_path.to_path_buf(),
             username: self.service_data.user.clone(),
             working_directory: None,
+            disable_restart_on_failure: true,
         })
     }
 

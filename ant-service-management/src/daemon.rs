@@ -72,6 +72,7 @@ impl ServiceStateActions for DaemonService<'_> {
             program: self.service_data.daemon_path.clone(),
             username: None,
             working_directory: None,
+            disable_restart_on_failure: false,
         };
         Ok(install_ctx)
     }
