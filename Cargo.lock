@@ -8352,7 +8352,7 @@ dependencies = [
 [[package]]
 name = "service-manager"
 version = "0.7.1"
-source = "git+https://github.com/mickvandijke/service-manager-rs?rev=bcdde8cbdfd27a8e6b1773a22eb8df76cb0fbd22#bcdde8cbdfd27a8e6b1773a22eb8df76cb0fbd22"
+source = "git+https://github.com/mickvandijke/service-manager-rs?rev=2a5ca4b0c876ee91dfe58315df41f889ff276e47#2a5ca4b0c876ee91dfe58315df41f889ff276e47"
 dependencies = [
  "cfg-if",
  "dirs",
