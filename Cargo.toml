@@ -52,6 +52,3 @@ tag = false
 
 [workspace.dependencies]
 backtrace = "=0.3.71"
-
-[patch.crates-io]
-service-manager = { git = "https://github.com/mickvandijke/service-manager-rs", rev = "2a5ca4b0c876ee91dfe58315df41f889ff276e47" }

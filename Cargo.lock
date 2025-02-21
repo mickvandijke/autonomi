@@ -8352,8 +8352,9 @@ dependencies = [
 
 [[package]]
 name = "service-manager"
-version = "0.7.1"
-source = "git+https://github.com/mickvandijke/service-manager-rs?rev=2a5ca4b0c876ee91dfe58315df41f889ff276e47#2a5ca4b0c876ee91dfe58315df41f889ff276e47"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2cae942acfe9cecd4450998408f52e1c1ee083145226b7b803bd0d82e1c86912"
 dependencies = [
  "cfg-if",
  "dirs",
