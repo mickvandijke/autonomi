@@ -68,6 +68,7 @@ const PEERS_WIDTH: usize = 5;
 const CONNS_WIDTH: usize = 5;
 const MODE_WIDTH: usize = 7;
 const STATUS_WIDTH: usize = 8;
+const FAILURE_WIDTH: usize = 64;
 const SPINNER_WIDTH: usize = 1;
 
 #[derive(Clone)]
@@ -251,6 +252,7 @@ impl Status<'_> {
                         connections: 0,
                         mode: NodeConnectionMode::from(node_item),
                         status: NodeStatus::Added, // Set initial status as Added
+                        failure: node_item.get_critical_failure(),
                         spinner: Throbber::default(),
                         spinner_state: ThrobberState::default(),
                     };
@@ -286,6 +288,7 @@ impl Status<'_> {
                         connections: 0,
                         mode: NodeConnectionMode::from(node_item),
                         status,
+                        failure: node_item.get_critical_failure(),
                         spinner: Throbber::default(),
                         spinner_state: ThrobberState::default(),
                     })
@@ -988,6 +991,7 @@ impl Component for Status<'_> {
                     Constraint::Min(CONNS_WIDTH as u16),
                     Constraint::Min(MODE_WIDTH as u16),
                     Constraint::Min(STATUS_WIDTH as u16),
+                    Constraint::Fill(FAILURE_WIDTH as u16),
                     Constraint::Max(SPINNER_WIDTH as u16),
                 ];
 
@@ -1006,6 +1010,7 @@ impl Component for Status<'_> {
                     Cell::new("Conns").fg(COOL_GREY),
                     Cell::new("Mode").fg(COOL_GREY),
                     Cell::new("Status").fg(COOL_GREY),
+                    Cell::new("Failure").fg(COOL_GREY),
                     Cell::new(" ").fg(COOL_GREY), // Spinner
                 ])
                 .style(Style::default().add_modifier(Modifier::BOLD));
@@ -1240,6 +1245,7 @@ pub struct NodeItem<'a> {
     connections: usize,
     mode: NodeConnectionMode,
     status: NodeStatus,
+    failure: Option<(chrono::DateTime<chrono::Utc>, String)>,
     spinner: Throbber<'a>,
     spinner_state: ThrobberState,
 }
@@ -1307,6 +1313,17 @@ impl NodeItem<'_> {
             _ => {}
         };
 
+        let failure = self.failure.as_ref().map_or_else(
+            || "-".to_string(),
+            |(_dt, msg)| {
+                if self.status == NodeStatus::Stopped {
+                    msg.clone()
+                } else {
+                    "-".to_string()
+                }
+            },
+        );
+
         let row = vec![
             self.name.clone().to_string(),
             self.version.to_string(),
@@ -1342,6 +1359,7 @@ impl NodeItem<'_> {
             ),
             self.mode.to_string(),
             self.status.to_string(),
+            failure,
         ];
         let throbber_area = Rect::new(area.width - 3, area.y + 2 + index as u16, 1, 1);
 
