@@ -9,9 +9,11 @@
 #[macro_use]
 extern crate tracing;
 
+mod log;
 mod rpc_service;
 mod subcommands;
 
+use crate::log::set_critical_failure;
 use crate::subcommands::EvmNetworkCommand;
 use ant_bootstrap::{BootstrapCacheStore, PeersArgs};
 use ant_evm::{get_evm_network, EvmNetwork, RewardsAddress};
@@ -453,6 +455,7 @@ You can check your reward balance by running:
                     }
                     StopResult::Error(cause) => {
                         error!("Node stopped with error: {}", cause);
+                        set_critical_failure(log_output_dest, &cause.to_string());
                         return Err(cause);
                     }
                 }

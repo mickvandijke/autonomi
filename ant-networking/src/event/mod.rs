@@ -31,6 +31,7 @@ use ant_protocol::{
 };
 #[cfg(feature = "open-metrics")]
 use std::collections::HashSet;
+use std::fmt::Display;
 use std::{
     collections::BTreeMap,
     fmt::{Debug, Formatter},
@@ -209,6 +210,19 @@ impl Debug for NetworkEvent {
                     f,
                     "NetworkEvent::FreshReplicateToFetch({holder:?}, {keys:?})"
                 )
+            }
+        }
+    }
+}
+
+impl Display for TerminateNodeReason {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            TerminateNodeReason::HardDiskWriteError => {
+                write!(f, "HardDiskWriteError")
+            }
+            TerminateNodeReason::UpnpGatewayNotFound => {
+                write!(f, "UPnP gateway not found. Enable UPnP on your router to allow incoming connections or manually port forward.")
             }
         }
     }

@@ -521,12 +521,11 @@ impl Node {
                     }
                 });
             }
-
             NetworkEvent::TerminateNode { reason } => {
                 event_header = "TerminateNode";
                 error!("Received termination from swarm_driver due to {reason:?}");
                 self.events_channel()
-                    .broadcast(NodeEvent::TerminateNode(format!("{reason:?}")));
+                    .broadcast(NodeEvent::TerminateNode(format!("{reason}")));
             }
             NetworkEvent::FailedToFetchHolders(bad_nodes) => {
                 event_header = "FailedToFetchHolders";
