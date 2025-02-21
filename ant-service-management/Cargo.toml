@@ -29,6 +29,7 @@ tokio = { version = "1.32.0", features = ["time"] }
 tonic = { version = "0.6.2" }
 tracing = { version = "~0.1.26" }
 tracing-core = "0.1.30"
+chrono = "0.4.39"
 
 [build-dependencies]
 # watch out updating this, protoc compiler needs to be installed on all build systems

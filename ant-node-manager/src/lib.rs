@@ -408,6 +408,14 @@ pub async fn status_report(
                 "PID: {}",
                 node.pid.map_or("-".to_string(), |p| p.to_string())
             );
+            if node.status == ServiceStatus::Stopped {
+                if let Some(failure_reason) = node.get_critical_failure() {
+                    println!(
+                        "Failure reason: [{}] {}",
+                        failure_reason.0, failure_reason.1
+                    );
+                }
+            }
             println!("Data path: {}", node.data_dir_path.to_string_lossy());
             println!("Log path: {}", node.log_dir_path.to_string_lossy());
             println!("Bin path: {}", node.antnode_path.to_string_lossy());
@@ -448,8 +456,8 @@ pub async fn status_report(
         }
     } else {
         println!(
-            "{:<18} {:<52} {:<7} {:>15}",
-            "Service Name", "Peer ID", "Status", "Connected Peers"
+            "{:<18} {:<52} {:<7} {:>15} {:<}",
+            "Service Name", "Peer ID", "Status", "Connected Peers", "Failure"
         );
         let nodes = node_registry
             .nodes
@@ -462,29 +470,38 @@ pub async fn status_report(
                 .connected_peers
                 .clone()
                 .map_or("-".to_string(), |p| p.len().to_string());
+            let failure_reason = if node.status == ServiceStatus::Stopped {
+                node.get_critical_failure()
+                    .map_or("-".to_string(), |(_time, reason)| reason)
+            } else {
+                "-".to_string()
+            };
             println!(
-                "{:<18} {:<52} {:<7} {:>15}",
+                "{:<18} {:<52} {:<7} {:>15} {:<}",
                 node.service_name,
                 peer_id,
                 format_status(&node.status),
-                connected_peers
+                connected_peers,
+                failure_reason
             );
         }
         if let Some(daemon) = &node_registry.daemon {
             println!(
-                "{:<18} {:<52} {:<7} {:>15}",
+                "{:<18} {:<52} {:<7} {:>15} {:>15}",
                 daemon.service_name,
                 "-",
                 format_status(&daemon.status),
+                "-",
                 "-"
             );
         }
         if let Some(faucet) = &node_registry.faucet {
             println!(
-                "{:<18} {:<52} {:<7} {:>15}",
+                "{:<18} {:<52} {:<7} {:>15} {:>15}",
                 faucet.service_name,
                 "-",
                 format_status(&faucet.status),
+                "-",
                 "-"
             );
         }

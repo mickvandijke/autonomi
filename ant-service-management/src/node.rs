@@ -386,6 +386,27 @@ impl NodeServiceData {
         }
         None
     }
+
+    /// Returns an optional critical failure of the node.
+    pub fn get_critical_failure(&self) -> Option<(chrono::DateTime<chrono::Utc>, String)> {
+        const CRITICAL_FAILURE_LOG_FILE: &str = "critical_failure.log";
+
+        let log_path = self.log_dir_path.join(CRITICAL_FAILURE_LOG_FILE);
+
+        if let Ok(content) = std::fs::read_to_string(log_path) {
+            if let Some((timestamp, message)) = content.split_once(']') {
+                let timestamp_trimmed = timestamp.trim_start_matches('[').trim();
+                if let Ok(datetime) = timestamp_trimmed.parse::<chrono::DateTime<chrono::Utc>>() {
+                    let message_trimmed = message
+                        .trim()
+                        .trim_start_matches("Node terminated due to: ");
+                    return Some((datetime, message_trimmed.to_string()));
+                }
+            }
+        }
+
+        None
+    }
 }
 
 /// Pushes arguments from the `PeersArgs` struct to the provided `args` vector.
