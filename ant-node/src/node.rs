@@ -727,7 +727,8 @@ impl Node {
         rewards_address: RewardsAddress,
         network: &Network,
     ) -> QueryResponse {
-        let rewards_address_proof = RewardsAddressProof::new(rewards_address, network.keypair());
+        let rewards_address_proof =
+            RewardsAddressProof::sign_new(rewards_address, network.keypair());
         rewards_address_proof.into()
     }
 
