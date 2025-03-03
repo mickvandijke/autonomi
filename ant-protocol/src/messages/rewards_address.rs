@@ -80,3 +80,31 @@ impl RewardsAddressProof {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::messages::RewardsAddressProof;
+    use ant_evm::RewardsAddress;
+    use libp2p::identity::{Keypair, PublicKey};
+
+    #[test]
+    fn test_rewards_address_proof_creation() {
+        let keypair = Keypair::generate_ed25519();
+        let peer_id = keypair.public().to_peer_id();
+        let rewards_address = RewardsAddress::new([1u8; 20]);
+
+        let proof = RewardsAddressProof::sign_new(rewards_address, &keypair);
+
+        assert!(proof.is_signature_valid());
+        assert!(!proof.is_expired());
+
+        // Get the pubkey from the proof
+        let pub_key = PublicKey::try_decode_protobuf(proof.pub_key.as_slice()).unwrap();
+
+        assert_eq!(pub_key.to_peer_id(), peer_id);
+        assert!(pub_key.verify(proof.to_payload().as_slice(), &proof.signature));
+
+        let wrong_pub_key = Keypair::generate_ed25519().public();
+        assert!(!wrong_pub_key.verify(proof.to_payload().as_slice(), &proof.signature))
+    }
+}
