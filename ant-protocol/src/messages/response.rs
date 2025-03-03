@@ -8,8 +8,8 @@
 
 use crate::{error::Result, NetworkAddress};
 
-use super::ChunkProof;
-use ant_evm::PaymentQuote;
+use super::{ChunkProof, RewardsAddressProof};
+use ant_evm::{PaymentQuote, RewardsAddress};
 use bytes::Bytes;
 use core::fmt;
 use libp2p::Multiaddr;
@@ -76,6 +76,29 @@ pub enum QueryResponse {
         peer: NetworkAddress,
         version: String,
     },
+    // ===== GetRewardsAddress =====
+    //
+    /// Response to [`GetRewardsAddress`]
+    ///
+    /// [`GetRewardsAddress`]: crate::messages::Query::GetRewardsAddress
+    GetRewardsAddress {
+        // Rewards address of the node.
+        rewards_address: RewardsAddress,
+        // Expiration date of the response as seconds since UNIX epoch.
+        date_expiration: u64,
+        // Signature of the response.
+        signature: Vec<u8>,
+    },
+}
+
+impl From<RewardsAddressProof> for QueryResponse {
+    fn from(value: RewardsAddressProof) -> Self {
+        Self::GetRewardsAddress {
+            rewards_address: value.rewards_address,
+            date_expiration: value.date_expiration,
+            signature: value.signature,
+        }
+    }
 }
 
 // Debug implementation for QueryResponse, to avoid printing Vec<u8>
@@ -130,6 +153,16 @@ impl Debug for QueryResponse {
             }
             QueryResponse::GetVersion { peer, version } => {
                 write!(f, "GetVersion peer {peer:?} has version of {version:?}")
+            }
+            QueryResponse::GetRewardsAddress {
+                rewards_address,
+                date_expiration,
+                signature,
+            } => {
+                write!(
+                    f,
+                    "GetRewardsAddress address {rewards_address:?} expiration date {date_expiration:?} signature {signature:?}"
+                )
             }
         }
     }

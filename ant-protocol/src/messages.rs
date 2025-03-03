@@ -12,6 +12,7 @@ mod cmd;
 mod node_id;
 mod query;
 mod response;
+mod rewards_address;
 
 pub use self::{
     chunk_proof::{ChunkProof, Nonce},
@@ -19,6 +20,7 @@ pub use self::{
     node_id::NodeId,
     query::Query,
     response::{CmdResponse, QueryResponse},
+    rewards_address::RewardsAddressProof,
 };
 
 use super::NetworkAddress;
@@ -45,9 +47,9 @@ pub enum Response {
 
 impl Request {
     /// Used to send a request to the close group of the address.
-    pub fn dst(&self) -> NetworkAddress {
+    pub fn dst(&self) -> Option<NetworkAddress> {
         match self {
-            Request::Cmd(cmd) => cmd.dst(),
+            Request::Cmd(cmd) => Some(cmd.dst()),
             Request::Query(query) => query.dst(),
         }
     }

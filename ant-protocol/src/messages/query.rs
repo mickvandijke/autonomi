@@ -74,19 +74,22 @@ pub enum Query {
     /// *** From now on, the order of variants shall be retained to be backward compatible
     /// Query peer's cargo package version.
     GetVersion(NetworkAddress),
+    /// Query the rewards address of a node
+    GetRewardsAddress,
 }
 
 impl Query {
     /// Used to send a query to the close group of the address.
-    pub fn dst(&self) -> NetworkAddress {
+    pub fn dst(&self) -> Option<NetworkAddress> {
         match self {
-            Query::CheckNodeInProblem(address) | Query::GetVersion(address) => address.clone(),
+            Query::CheckNodeInProblem(address) | Query::GetVersion(address) => Some(address.clone()),
             // Shall not be called for this, as this is a `one-to-one` message,
             // and the destination shall be decided by the requester already.
             Query::GetStoreQuote { key, .. }
             | Query::GetReplicatedRecord { key, .. }
             | Query::GetChunkExistenceProof { key, .. }
-            | Query::GetClosestPeers { key, .. } => key.clone(),
+            | Query::GetClosestPeers { key, .. } => Some(key.clone()),
+            Query::GetRewardsAddress => None,
         }
     }
 }
@@ -136,6 +139,9 @@ impl std::fmt::Display for Query {
             }
             Query::GetVersion(address) => {
                 write!(f, "Query::GetVersion({address:?})")
+            }
+            Query::GetRewardsAddress => {
+                write!(f, "Query::GetRewardsAddress")
             }
         }
     }

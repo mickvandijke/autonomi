@@ -21,6 +21,7 @@ use ant_networking::MetricsRegistries;
 use ant_networking::{
     time::sleep, Instant, Network, NetworkBuilder, NetworkEvent, NodeIssue, SwarmDriver,
 };
+use ant_protocol::messages::RewardsAddressProof;
 use ant_protocol::{
     error::Error as ProtocolError,
     messages::{ChunkProof, CmdResponse, Nonce, Query, QueryResponse, Request, Response},
@@ -714,8 +715,20 @@ impl Node {
                 peer: NetworkAddress::from_peer(network.peer_id()),
                 version: ant_build_info::package_version(),
             },
+            Query::GetRewardsAddress => {
+                debug!("Got GetRewardsAddress");
+                Self::respond_with_rewards_address_proof(payment_address, network)
+            }
         };
         Response::Query(resp)
+    }
+
+    fn respond_with_rewards_address_proof(
+        rewards_address: RewardsAddress,
+        network: &Network,
+    ) -> QueryResponse {
+        let rewards_address_proof = RewardsAddressProof::new(rewards_address, network.keypair());
+        rewards_address_proof.into()
     }
 
     async fn respond_get_closest_peers(
