@@ -51,6 +51,7 @@ pub use time::{interval, sleep, spawn, Instant, Interval};
 
 use self::{cmd::NetworkSwarmCmd, error::Result};
 use ant_evm::{PaymentQuote, QuotingMetrics};
+use ant_protocol::messages::RewardsAddressProof;
 use ant_protocol::{
     error::Error as ProtocolError,
     messages::{ChunkProof, Nonce, Query, QueryResponse, Request, Response},
@@ -376,6 +377,30 @@ impl Network {
         Err(NetworkError::FailedToVerifyChunkProof(
             chunk_address.clone(),
         ))
+    }
+
+    /// Get the rewards address with proof from a node.
+    /// This proof can be shared with peers so that they do not have the request the rewards address from the same node again.
+    pub async fn get_rewards_address_with_proof(
+        &self,
+        peer_id: PeerId,
+    ) -> Result<RewardsAddressProof> {
+        let request = Request::Query(Query::GetRewardsAddress);
+
+        let response = self.send_request(request, peer_id).await;
+
+        match response {
+            Ok(Response::Query(QueryResponse::GetRewardsAddress(rewards_address_proof))) => {
+                info!("Successfully retrieved rewards address proof: {rewards_address_proof:?}");
+                Ok(rewards_address_proof)
+            }
+            other => {
+                error!(
+                    "Failed to get rewards address proof, got an unexpected response: {other:?}"
+                );
+                Err(NetworkError::GetRewardsAddressProof)
+            }
+        }
     }
 
     /// Get the store costs from the majority of the closest peers to the provided RecordKey.

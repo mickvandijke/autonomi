@@ -12,12 +12,12 @@ use crate::client::utils::process_tasks_with_max_concurrency;
 use ant_evm::payment_vault::get_market_price;
 use ant_evm::{Amount, PaymentQuote, QuotePayment, QuotingMetrics};
 use ant_networking::{Network, NetworkError};
+use ant_protocol::messages::RewardsAddressProof;
+pub use ant_protocol::storage::DataTypes;
 use ant_protocol::{storage::ChunkAddress, NetworkAddress, CLOSE_GROUP_SIZE};
 use libp2p::PeerId;
 use std::collections::HashMap;
 use xor_name::XorName;
-
-pub use ant_protocol::storage::DataTypes;
 
 // todo: limit depends per RPC endpoint. We should make this configurable
 // todo: test the limit for the Arbitrum One public RPC endpoint
@@ -201,6 +201,13 @@ impl Client {
         }
 
         Ok(StoreQuote(quotes_to_pay_per_addr))
+    }
+
+    pub async fn get_rewards_address_for_peer(
+        &self,
+        peer_id: PeerId,
+    ) -> Result<RewardsAddressProof, NetworkError> {
+        self.network.get_rewards_address_with_proof(peer_id).await
     }
 }
 

@@ -1,10 +1,12 @@
 use crate::time::time_in_secs_since_unix_epoch;
 use ant_evm::RewardsAddress;
 use libp2p::identity::Keypair;
+use serde::{Deserialize, Serialize};
 
 const REWARDS_PROOF_VALID_FOR_SECS: u64 = 172800; // 172800 secs is 48 hours
 
 /// Rewards address with expiration date and signature signed by the providing node.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
 pub struct RewardsAddressProof {
     /// Rewards address of the node.
     pub rewards_address: RewardsAddress,
