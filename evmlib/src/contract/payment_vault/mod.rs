@@ -33,14 +33,6 @@ pub async fn verify_data_payment(
 
     let mut amount = Amount::ZERO;
 
-    // @mick remove the line below once the smart contract is updated
-    let payment: Vec<_> = payment
-        .into_iter()
-        .map(|(quote_hash, quoting_metrics, address, _relayer)| {
-            (quote_hash, quoting_metrics, address)
-        })
-        .collect();
-
     let payment_verifications: Vec<_> = payment
         .into_iter()
         .map(interface::IPaymentVault::PaymentVerification::from)

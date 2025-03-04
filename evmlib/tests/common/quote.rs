@@ -5,6 +5,7 @@ use evmlib::utils::{dummy_address, dummy_hash};
 pub fn random_quote_payment() -> QuotePayment {
     let quote_hash = dummy_hash();
     let reward_address = dummy_address();
+    let relay_address = None;
     let amount = Amount::from(1);
-    (quote_hash, reward_address, amount)
+    (quote_hash, reward_address, relay_address, amount)
 }

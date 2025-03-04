@@ -123,6 +123,11 @@
         "components": [
           {
             "internalType": "address",
+            "name": "relayNodeAddress",
+            "type": "address"
+          },
+          {
+            "internalType": "address",
             "name": "rewardsAddress",
             "type": "address"
           },
@@ -218,6 +223,11 @@
           {
             "internalType": "address",
             "name": "rewardsAddress",
+            "type": "address"
+          },
+          {
+            "internalType": "address",
+            "name": "relayNodeAddress",
             "type": "address"
           },
           {

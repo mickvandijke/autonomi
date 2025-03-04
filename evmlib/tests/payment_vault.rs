@@ -223,6 +223,7 @@ async fn test_verify_payment_on_local() {
             }
             .into(),
             rewardsAddress: v.1,
+            relayNodeAddress: v.2.unwrap_or_default(),
             quoteHash: v.0,
         })
         .collect();

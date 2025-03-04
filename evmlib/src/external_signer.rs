@@ -66,7 +66,7 @@ pub fn pay_for_quotes_calldata<T: IntoIterator<Item = QuotePayment>>(
 ) -> Result<PayForQuotesCalldataReturnType, Error> {
     let payments: Vec<_> = payments.into_iter().collect();
 
-    let total_amount = payments.iter().map(|(_, _, amount)| amount).sum();
+    let total_amount = payments.iter().map(|(_, _, _, amount)| amount).sum();
 
     let approve_spender = *network.data_payments_address();
     let approve_amount = total_amount;
@@ -85,7 +85,7 @@ pub fn pay_for_quotes_calldata<T: IntoIterator<Item = QuotePayment>>(
     for batch in chunks {
         let quote_payments = batch.to_vec();
         let (calldata, _) = data_payments.pay_for_quotes_calldata(quote_payments.clone())?;
-        let quote_hashes = quote_payments.into_iter().map(|(qh, _, _)| qh).collect();
+        let quote_hashes = quote_payments.into_iter().map(|(qh, _, _, _)| qh).collect();
         calldata_map.insert(calldata, quote_hashes);
     }
 

@@ -89,7 +89,7 @@ async fn test_pay_for_quotes_and_data_payment_verification() {
         unique_tx_hashes.len(),
         TRANSFERS.div_ceil(MAX_TRANSFERS_PER_TRANSACTION)
     );
-    for (quote_hash, reward_addr, _) in quote_payments.iter() {
+    for (quote_hash, reward_addr, relay_addr, _) in quote_payments.iter() {
         let result = verify_data_payment(
             &network,
             vec![*quote_hash],
@@ -107,7 +107,7 @@ async fn test_pay_for_quotes_and_data_payment_verification() {
                     network_size: None,
                 },
                 *reward_addr,
-                None,
+                *relay_addr,
             )],
         )
         .await;

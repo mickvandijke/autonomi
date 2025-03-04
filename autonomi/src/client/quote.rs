@@ -59,8 +59,8 @@ impl StoreQuote {
     pub fn payments(&self) -> Vec<QuotePayment> {
         let mut quote_payments = vec![];
         for (_address, quote) in self.0.iter() {
-            for (_peer, quote, price, _relay_addr) in quote.0.iter() {
-                quote_payments.push((quote.hash(), quote.rewards_address, *price));
+            for (_peer, quote, price, relay_addr) in quote.0.iter() {
+                quote_payments.push((quote.hash(), quote.rewards_address, *relay_addr, *price));
             }
         }
         quote_payments

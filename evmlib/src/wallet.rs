@@ -329,7 +329,7 @@ pub async fn pay_for_quotes<T: IntoIterator<Item = QuotePayment>>(
     let payments: Vec<_> = payments.into_iter().collect();
     info!("Paying for quotes of len: {}", payments.len());
 
-    let total_amount_to_be_paid = payments.iter().map(|(_, _, amount)| amount).sum();
+    let total_amount_to_be_paid = payments.iter().map(|(_, _, _, amount)| amount).sum();
 
     // Get current wallet token balance
     let wallet_balance = balance_of_tokens(wallet_address(&wallet), network)
@@ -373,7 +373,7 @@ pub async fn pay_for_quotes<T: IntoIterator<Item = QuotePayment>>(
     // remove payments with 0 amount as they don't need to be paid for
     let payment_for_batch: Vec<QuotePayment> = payments
         .into_iter()
-        .filter(|(_, _, amount)| *amount > Amount::ZERO)
+        .filter(|(_, _, _, amount)| *amount > Amount::ZERO)
         .collect();
 
     // Divide transfers over multiple transactions if they exceed the max per transaction.
@@ -396,7 +396,7 @@ pub async fn pay_for_quotes<T: IntoIterator<Item = QuotePayment>>(
 
         info!("Paid for batch of quotes with final tx hash: {tx_hash}");
 
-        for (quote_hash, _, _) in batch {
+        for (quote_hash, _, _, _) in batch {
             tx_hashes_by_quote.insert(quote_hash, tx_hash);
         }
     }

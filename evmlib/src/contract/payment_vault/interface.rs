@@ -8,24 +8,28 @@ sol!(
     #[derive(Debug)]
     #[sol(rpc)]
     IPaymentVault,
-    "abi/IPaymentVaultV2.json"
+    "abi/IPaymentVaultV3.json"
 );
 
-impl From<(QuoteHash, QuotingMetrics, Address)> for IPaymentVault::PaymentVerification {
-    fn from(value: (QuoteHash, QuotingMetrics, Address)) -> Self {
+impl From<(QuoteHash, QuotingMetrics, Address, Option<Address>)>
+    for IPaymentVault::PaymentVerification
+{
+    fn from(value: (QuoteHash, QuotingMetrics, Address, Option<Address>)) -> Self {
         Self {
             metrics: value.1.into(),
             rewardsAddress: value.2,
+            relayNodeAddress: value.3.unwrap_or_default(),
             quoteHash: value.0,
         }
     }
 }
 
-impl From<(QuoteHash, Address, Amount)> for IPaymentVault::DataPayment {
-    fn from(value: (QuoteHash, Address, Amount)) -> Self {
+impl From<(QuoteHash, Address, Option<Address>, Amount)> for IPaymentVault::DataPayment {
+    fn from(value: (QuoteHash, Address, Option<Address>, Amount)) -> Self {
         Self {
+            relayNodeAddress: value.2.unwrap_or_default(),
             rewardsAddress: value.1,
-            amount: value.2,
+            amount: value.3,
             quoteHash: value.0,
         }
     }
