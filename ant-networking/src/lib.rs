@@ -50,7 +50,7 @@ pub use metrics::service::MetricsRegistries;
 pub use time::{interval, sleep, spawn, Instant, Interval};
 
 use self::{cmd::NetworkSwarmCmd, error::Result};
-use ant_evm::{PaymentQuote, QuotingMetrics};
+use ant_evm::{EvmAddress, PaymentQuote, QuotingMetrics};
 use ant_protocol::messages::RewardsAddressProof;
 use ant_protocol::{
     error::Error as ProtocolError,
@@ -414,7 +414,14 @@ impl Network {
         data_type: u32,
         data_size: usize,
         ignore_peers: Vec<PeerId>,
-    ) -> Result<Vec<(PeerId, PaymentQuote)>> {
+    ) -> Result<
+        //   PeerId of the peer
+        //   |       Signed quote from the peer
+        //   |       |             Relayer node to reward if any
+        //   |       |             |
+        //   V       V             V
+        Vec<(PeerId, PaymentQuote, Option<EvmAddress>)>,
+    > {
         // The requirement of having at least CLOSE_GROUP_SIZE
         // close nodes will be checked internally automatically.
         let mut close_nodes = self
@@ -477,8 +484,26 @@ impl Network {
                         continue;
                     }
 
-                    all_quotes.push((peer_address.clone(), quote.clone()));
-                    quotes_to_pay.push((peer, quote));
+                    // Check if we need to reward a relayer node too
+                    let relay_addr = if let Some(relay_peer_id) = get_relay_peer_if_any(&peer) {
+                        info!("Peer {peer:?} is relayed through {relay_peer_id:?}, getting rewards address for the relayer to reward it too");
+                        let rewards_address_proof =
+                            self.get_rewards_address_with_proof(relay_peer_id).await?;
+                        if !rewards_address_proof.is_signature_valid() {
+                            warn!("Peer {peer_address:?} is relayed. Received invalid (bad signature) rewards address proof from the relay peer {relay_peer_id:?}");
+                            continue;
+                        }
+                        if rewards_address_proof.is_expired() {
+                            warn!("Peer {peer_address:?} is relayed. Received expired rewards address proof from the relay peer {relay_peer_id:?}");
+                            continue;
+                        }
+                        Some(rewards_address_proof.rewards_address)
+                    } else {
+                        None
+                    };
+
+                    all_quotes.push((peer_address.clone(), quote.clone(), relay_addr));
+                    quotes_to_pay.push((peer, quote, relay_addr));
                 }
                 Ok(Response::Query(QueryResponse::GetStoreQuote {
                     quote: Err(ProtocolError::RecordExists(_)),
@@ -1178,6 +1203,13 @@ impl Network {
         debug!("Received all responses for {req:?}");
         responses
     }
+}
+
+/// Check if the given peer is relayed through a relay node
+/// Returns the relayer peer if it is relayed
+fn get_relay_peer_if_any(_peer: &PeerId) -> Option<PeerId> {
+    // @mick not sure how to do this, leaving it as None as a placeholder
+    None
 }
 
 /// Verifies if `Multiaddr` contains IPv4 address that is not global.

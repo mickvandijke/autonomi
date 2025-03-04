@@ -26,12 +26,20 @@ pub async fn get_market_price(
 pub async fn verify_data_payment(
     network: &Network,
     owned_quote_hashes: Vec<QuoteHash>,
-    payment: Vec<(QuoteHash, QuotingMetrics, Address)>,
+    payment: Vec<(QuoteHash, QuotingMetrics, Address, Option<Address>)>,
 ) -> Result<Amount, error::Error> {
     let provider = http_provider(network.rpc_url().clone());
     let payment_vault = PaymentVaultHandler::new(*network.data_payments_address(), provider);
 
     let mut amount = Amount::ZERO;
+
+    // @mick remove the line below once the smart contract is updated
+    let payment: Vec<_> = payment
+        .into_iter()
+        .map(|(quote_hash, quoting_metrics, address, _relayer)| {
+            (quote_hash, quoting_metrics, address)
+        })
+        .collect();
 
     let payment_verifications: Vec<_> = payment
         .into_iter()

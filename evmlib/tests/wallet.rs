@@ -107,6 +107,7 @@ async fn test_pay_for_quotes_and_data_payment_verification() {
                     network_size: None,
                 },
                 *reward_addr,
+                None,
             )],
         )
         .await;

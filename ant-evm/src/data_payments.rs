@@ -41,16 +41,35 @@ impl From<PeerId> for EncodedPeerId {
 /// The proof of payment for a data payment
 #[derive(Debug, Clone, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct ProofOfPayment {
-    pub peer_quotes: Vec<(EncodedPeerId, PaymentQuote)>,
+    ///                   PeerId of the peer
+    ///                   |              Signed quote from the peer
+    ///                   |              |             Relayer node to reward if any
+    ///                   |              |             |
+    ///                   V              V             V
+    pub peer_quotes: Vec<(EncodedPeerId, PaymentQuote, Option<RewardsAddress>)>,
 }
 
 impl ProofOfPayment {
     /// returns a short digest of the proof of payment to use for verification
-    pub fn digest(&self) -> Vec<(QuoteHash, QuotingMetrics, RewardsAddress)> {
+    pub fn digest(
+        &self,
+    ) -> Vec<(
+        QuoteHash,
+        QuotingMetrics,
+        RewardsAddress,
+        Option<RewardsAddress>,
+    )> {
         self.peer_quotes
             .clone()
             .into_iter()
-            .map(|(_, quote)| (quote.hash(), quote.quoting_metrics, quote.rewards_address))
+            .map(|(_, quote, relayer)| {
+                (
+                    quote.hash(),
+                    quote.quoting_metrics,
+                    quote.rewards_address,
+                    relayer,
+                )
+            })
             .collect()
     }
 
@@ -58,7 +77,7 @@ impl ProofOfPayment {
     pub fn payees(&self) -> Vec<PeerId> {
         self.peer_quotes
             .iter()
-            .filter_map(|(peer_id, _)| peer_id.to_peer_id().ok())
+            .filter_map(|(peer_id, _, _)| peer_id.to_peer_id().ok())
             .collect()
     }
 
@@ -66,14 +85,14 @@ impl ProofOfPayment {
     pub fn has_expired(&self) -> bool {
         self.peer_quotes
             .iter()
-            .any(|(_, quote)| quote.has_expired())
+            .any(|(_, quote, _)| quote.has_expired())
     }
 
     /// Returns all quotes by given peer id
     pub fn quotes_by_peer(&self, peer_id: &PeerId) -> Vec<&PaymentQuote> {
         self.peer_quotes
             .iter()
-            .filter_map(|(_id, quote)| {
+            .filter_map(|(_id, quote, _)| {
                 if let Ok(quote_peer_id) = quote.peer_id() {
                     if *peer_id == quote_peer_id {
                         return Some(quote);
@@ -95,7 +114,7 @@ impl ProofOfPayment {
         }
 
         // verify all signatures
-        for (encoded_peer_id, quote) in self.peer_quotes.iter() {
+        for (encoded_peer_id, quote, _relayer) in self.peer_quotes.iter() {
             let peer_id = match encoded_peer_id.to_peer_id() {
                 Ok(peer_id) => peer_id,
                 Err(e) => {
@@ -113,7 +132,7 @@ impl ProofOfPayment {
 
     /// Verifies whether all quotes were made for the expected data type.
     pub fn verify_data_type(&self, data_type: u32) -> bool {
-        for (_, quote) in self.peer_quotes.iter() {
+        for (_, quote, _) in self.peer_quotes.iter() {
             if quote.quoting_metrics.data_type != data_type {
                 return false;
             }

@@ -38,10 +38,10 @@ pub fn receipt_from_store_quotes(quotes: StoreQuote) -> Receipt {
             peer_quotes: vec![],
         };
 
-        for (peer_id, quote, _amount) in quote_for_address.0 {
+        for (peer_id, quote, _amount, relayer) in quote_for_address.0 {
             proof_of_payment
                 .peer_quotes
-                .push((EncodedPeerId::from(peer_id), quote));
+                .push((EncodedPeerId::from(peer_id), quote, relayer));
         }
 
         // skip empty proofs
