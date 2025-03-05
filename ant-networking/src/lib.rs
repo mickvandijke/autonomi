@@ -813,6 +813,16 @@ impl Network {
         Ok(quoting_metrics)
     }
 
+    /// Get all the known addresses for a given peer from the routing table.
+    pub async fn get_addresses_for_peer(&self, peer_id: PeerId) -> Result<Vec<Multiaddr>> {
+        let (sender, receiver) = oneshot::channel();
+        self.send_local_swarm_cmd(LocalSwarmCmd::GetAddressesForPeer { peer_id, sender });
+
+        receiver
+            .await
+            .map_err(|_e| NetworkError::InternalMsgChannelDropped)
+    }
+
     /// Notify the node receicced a payment.
     pub fn notify_payment_received(&self) {
         self.send_local_swarm_cmd(LocalSwarmCmd::PaymentReceived);

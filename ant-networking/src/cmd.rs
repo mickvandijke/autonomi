@@ -117,6 +117,10 @@ pub enum LocalSwarmCmd {
         data_size: usize,
         sender: oneshot::Sender<Result<(QuotingMetrics, bool)>>,
     },
+    GetAddressesForPeer {
+        peer_id: PeerId,
+        sender: oneshot::Sender<Vec<Multiaddr>>,
+    },
     /// Notify the node received a payment.
     PaymentReceived,
     /// Put record to the local RecordStore
@@ -283,6 +287,9 @@ impl Debug for LocalSwarmCmd {
             }
             LocalSwarmCmd::GetLocalQuotingMetrics { .. } => {
                 write!(f, "LocalSwarmCmd::GetLocalQuotingMetrics")
+            }
+            LocalSwarmCmd::GetAddressesForPeer { .. } => {
+                write!(f, "LocalSwarmCmd::GetAddressesForPeer")
             }
             LocalSwarmCmd::PaymentReceived => {
                 write!(f, "LocalSwarmCmd::PaymentReceived")
@@ -719,6 +726,20 @@ impl SwarmDriver {
                 }
 
                 let _res = sender.send(Ok((quoting_metrics, is_already_stored)));
+            }
+            LocalSwarmCmd::GetAddressesForPeer { peer_id, sender } => {
+                cmd_string = "GetAddressesForPeer";
+                let mut result: Vec<Multiaddr> = vec![];
+                for kbucket in self.swarm.behaviour_mut().kademlia.kbuckets() {
+                    if let Some(peer_entry) = kbucket
+                        .iter()
+                        .find(|peer_entry| peer_entry.node.key.into_preimage() == peer_id)
+                    {
+                        result = peer_entry.node.value.clone().into_vec();
+                        break;
+                    }
+                }
+                let _ = sender.send(result);
             }
             LocalSwarmCmd::PaymentReceived => {
                 cmd_string = "PaymentReceived";
