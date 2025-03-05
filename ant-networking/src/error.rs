@@ -108,8 +108,13 @@ pub enum NetworkError {
     #[error("Failed to sign the message with the PeerId keypair")]
     SigningFailed(#[from] libp2p::identity::SigningError),
 
+    // Rewards address proof errors
     #[error("Could not get rewards address with proof")]
     GetRewardsAddressProof,
+    #[error("Received invalid rewards address proof")]
+    InvalidRewardsAddressProof,
+    #[error("Received expired rewards address proof")]
+    ExpiredRewardsAddressProof,
 
     // ---------- Record Errors
     // GetRecord query errors
