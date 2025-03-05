@@ -372,6 +372,20 @@ impl Network {
         ))
     }
 
+    /// Get the rewards address from a node.
+    pub async fn get_rewards_address(&self, peer_id: PeerId) -> Result<EvmAddress> {
+        let proof = self.get_rewards_address_with_proof(peer_id).await?;
+        if !proof.is_signature_valid() {
+            warn!("Received invalid rewards address proof from {peer_id:?}, {proof:?}");
+            return Err(NetworkError::InvalidRewardsAddressProof);
+        }
+        if proof.is_expired() {
+            warn!("Received expired rewards address proof from {peer_id:?}, {proof:?}");
+            return Err(NetworkError::ExpiredRewardsAddressProof);
+        }
+        Ok(proof.rewards_address)
+    }
+
     /// Get the rewards address with proof from a node.
     /// This proof can be shared with peers so that they do not have the request the rewards address from the same node again.
     pub async fn get_rewards_address_with_proof(
@@ -1185,7 +1199,7 @@ impl Network {
 
 /// Check if the given peer is relayed through a relay node
 /// Returns the relayer peer if it is relayed
-fn get_relay_peer_if_any(_peer: &PeerId) -> Option<PeerId> {
+pub fn get_relay_peer_if_any(_peer: &PeerId) -> Option<PeerId> {
     // @mick not sure how to do this, leaving it as None as a placeholder
     None
 }

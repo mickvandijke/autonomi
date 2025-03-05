@@ -676,6 +676,25 @@ impl Node {
             )));
         }
 
+        // verify if the payees are behind a relay node, and if so confirm the relayer node's reward address
+        for (peer, _quote, relayer_addr) in payment.peer_quotes.iter() {
+            let peer_id = peer.to_peer_id().map_err(|e| {
+                Error::InvalidRequest(format!(
+                    "Invalid peer id in payment for record {pretty_key}: {e}"
+                ))
+            })?;
+            if let Some(relayer_peer_id) = ant_networking::get_relay_peer_if_any(&peer_id) {
+                let relayer_rewards_addr =
+                    self.network().get_rewards_address(relayer_peer_id).await?;
+                if &Some(relayer_rewards_addr) != relayer_addr {
+                    warn!("Payment quote has wrong relayer rewards address for record {pretty_key}, expected {relayer_rewards_addr:?}, got {relayer_addr:?}");
+                    return Err(Error::InvalidRequest(format!(
+                        "Payment quote has wrong relayer rewards address for record {pretty_key}, expected {relayer_rewards_addr:?}, got {relayer_addr:?}"
+                    )));
+                }
+            }
+        }
+
         let owned_payment_quotes = payment
             .quotes_by_peer(&self_peer_id)
             .iter()
