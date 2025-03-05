@@ -498,8 +498,29 @@ impl Network {
                         continue;
                     }
 
+                    // OPTIMIZATION: The peer address/Multiaddr should be included in the quote response.
+                    // Get the most recent address of a peer
+                    let peer_multiaddr = match self.get_addresses_for_peer(peer).await {
+                        Ok(addresses) => {
+                            if let Some(address) = addresses.last() {
+                                address.clone()
+                            } else {
+                                // This should never happen
+                                warn!("Peer {peer:?} has zero known addresses");
+                                continue;
+                            }
+                        }
+                        Err(err) => {
+                            // This also should never happen
+                            warn!("Failed to get addresses for peer {peer:?}: {err}");
+                            continue;
+                        }
+                    };
+
                     // Check if we need to reward a relayer node too
-                    let relay_addr = if let Some(relay_peer_id) = get_relay_peer_if_any(&peer) {
+                    let relay_addr = if let Some(relay_peer_id) =
+                        get_relay_peer_if_any(peer_multiaddr)
+                    {
                         info!("Peer {peer:?} is relayed through {relay_peer_id:?}, getting rewards address for the relayer to reward it too");
                         let rewards_address_proof =
                             self.get_rewards_address_with_proof(relay_peer_id).await?;
@@ -1229,10 +1250,19 @@ impl Network {
     }
 }
 
-/// Check if the given peer is relayed through a relay node
+/// Check if the given multiaddr is relayed through a relay node
 /// Returns the relayer peer if it is relayed
-pub fn get_relay_peer_if_any(_peer: &PeerId) -> Option<PeerId> {
-    // @mick not sure how to do this, leaving it as None as a placeholder
+pub fn get_relay_peer_if_any(addr: Multiaddr) -> Option<PeerId> {
+    let mut last_peer_id = None;
+
+    for protocol in addr.iter() {
+        match protocol {
+            Protocol::P2p(peer_id) => last_peer_id = Some(peer_id),
+            Protocol::P2pCircuit => return last_peer_id,
+            _ => {}
+        }
+    }
+
     None
 }
 
@@ -1369,5 +1399,30 @@ mod tests {
         let sig = network.sign(msg)?;
         assert!(network.verify(msg, &sig));
         Ok(())
+    }
+
+    #[test]
+    fn test_get_relay_peer_if_any() {
+        use libp2p::{Multiaddr, PeerId};
+
+        // Create a Multiaddr with a relay node
+        let relayer_peer_id = PeerId::random();
+        let relayed_addr: Multiaddr =
+            format!("/ip4/192.168.0.1/udp/12345/quic-v1/p2p/{relayer_peer_id}/p2p-circuit/p2p/12D3KooWK3eVzzgRf8nKX6U6qyHfRWyZjaqYaMq7VjzbWEkhrrwX")
+                .parse()
+                .expect("Failed to create Multiaddr");
+
+        // Check that the relay peer is properly identified
+        let result = get_relay_peer_if_any(relayed_addr);
+        assert_eq!(result, Some(relayer_peer_id));
+
+        // Create a Multiaddr without a relay node
+        let addr_no_relay: Multiaddr = "/ip4/192.168.0.1/udp/12345/quic-v1/p2p/12D3KooWK3eVzzgRf8nKX6U6qyHfRWyZjaqYaMq7VjzbWEkhrrwX"
+            .parse()
+            .expect("Failed to create Multiaddr");
+
+        // Check that no relay peer is found
+        let result_no_relay = get_relay_peer_if_any(addr_no_relay);
+        assert_eq!(result_no_relay, None);
     }
 }

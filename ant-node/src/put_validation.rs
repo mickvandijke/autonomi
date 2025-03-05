@@ -691,7 +691,30 @@ impl Node {
                     "Invalid peer id in payment for record {pretty_key}: {e}"
                 ))
             })?;
-            if let Some(relayer_peer_id) = ant_networking::get_relay_peer_if_any(&peer_id) {
+
+            // Get the most recent address of a peer
+            let peer_multiaddr = match self.network().get_addresses_for_peer(peer_id).await {
+                Ok(addresses) => {
+                    if let Some(address) = addresses.last() {
+                        address.clone()
+                    } else {
+                        // This should never happen
+                        warn!("Internal node error: Peer {peer:?} has zero known addresses");
+                        return Err(Error::InvalidRequest(format!(
+                            "Internal node error: Peer {peer:?} has zero known addresses"
+                        )));
+                    }
+                }
+                Err(err) => {
+                    // This also should never happen
+                    warn!("Internal node error: Failed to get addresses for peer {peer:?}: {err}");
+                    return Err(Error::InvalidRequest(format!(
+                        "Internal node error: Failed to get addresses for peer {peer:?}: {err}"
+                    )));
+                }
+            };
+
+            if let Some(relayer_peer_id) = ant_networking::get_relay_peer_if_any(peer_multiaddr) {
                 let relayer_rewards_addr =
                     self.network().get_rewards_address(relayer_peer_id).await?;
                 if &Some(relayer_rewards_addr) != relayer_addr {
