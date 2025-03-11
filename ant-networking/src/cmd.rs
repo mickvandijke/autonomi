@@ -117,6 +117,7 @@ pub enum LocalSwarmCmd {
         data_size: usize,
         sender: oneshot::Sender<Result<(QuotingMetrics, bool)>>,
     },
+    /// Get all the known Multiaddr for a single peer
     GetAddressesForPeer {
         peer_id: PeerId,
         sender: oneshot::Sender<Vec<Multiaddr>>,
