@@ -692,11 +692,11 @@ impl Node {
                 ))
             })?;
 
-            // Get the most recent address of a peer
-            let peer_multiaddr = match self.network().get_addresses_for_peer(peer_id).await {
+            // Get the known addresses of a peer.
+            let peer_multiaddrs = match self.network().get_addresses_for_peer(peer_id).await {
                 Ok(addresses) => {
-                    if let Some(address) = addresses.last() {
-                        address.clone()
+                    if !addresses.is_empty() {
+                        addresses
                     } else {
                         // This should never happen
                         warn!("Internal node error: Peer {peer:?} has zero known addresses");
@@ -714,13 +714,38 @@ impl Node {
                 }
             };
 
-            if let Some(relayer_peer_id) = ant_networking::get_relay_peer_if_any(peer_multiaddr) {
-                let relayer_rewards_addr =
-                    self.network().get_rewards_address(relayer_peer_id).await?;
-                if &Some(relayer_rewards_addr) != relayer_addr {
-                    warn!("Payment quote has wrong relayer rewards address for record {pretty_key}, expected {relayer_rewards_addr:?}, got {relayer_addr:?}");
+            // See if there are any relayer peers in the peer addresses.
+            // Can be empty.
+            let relay_peers: Vec<_> = peer_multiaddrs
+                .into_iter()
+                .filter_map(ant_networking::get_relay_peer_if_any)
+                .collect();
+
+            // todo: Optimize this by including the full rewards address proof in the payment.
+            // Obtain reward addresses for relay peers.
+            let mut relay_peers_reward_addresses = vec![];
+            for relay_peer in relay_peers {
+                let relay_peer_reward_address =
+                    self.network().get_rewards_address(relay_peer).await?;
+                relay_peers_reward_addresses.push(relay_peer_reward_address);
+            }
+
+            // We expect a relayer peer to be paid here.
+            if !relay_peers_reward_addresses.is_empty() {
+                if let Some(relayer_rewards_addr) = relayer_addr {
+                    // Check if the paid relayer address was valid.
+                    if !relay_peers_reward_addresses.contains(relayer_rewards_addr) {
+                        warn!("Payment quote has wrong relayer rewards address for record {pretty_key}, expected {relayer_rewards_addr:?}, got {relayer_addr:?}");
+                        return Err(Error::InvalidRequest(format!(
+                            "Payment quote has wrong relayer rewards address for record {pretty_key}, expected {relayer_rewards_addr:?}, got {relayer_addr:?}"
+                        )));
+                    }
+                } else {
+                    warn!(
+                        "Payment quote is missing relayer rewards address for record {pretty_key}"
+                    );
                     return Err(Error::InvalidRequest(format!(
-                        "Payment quote has wrong relayer rewards address for record {pretty_key}, expected {relayer_rewards_addr:?}, got {relayer_addr:?}"
+                        "Payment quote is missing relayer rewards address for record {pretty_key}"
                     )));
                 }
             }

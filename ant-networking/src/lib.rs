@@ -834,8 +834,27 @@ impl Network {
         Ok(quoting_metrics)
     }
 
-    /// Get all the known addresses for a given peer from the routing table.
+    /// Get all the known addresses for a given peer from the routing table or from the swarm state if peer id is self.
     pub async fn get_addresses_for_peer(&self, peer_id: PeerId) -> Result<Vec<Multiaddr>> {
+        // Check if peer id is self.
+        if peer_id == self.inner.peer_id {
+            let mut addresses = self.get_swarm_local_state().await?.listeners;
+
+            // Check if the peer (self) uses a relay server.
+            if addresses
+                .iter()
+                .any(|multiaddr| multiaddr.iter().any(|p| matches!(p, Protocol::P2pCircuit)))
+            {
+                // Only return the relayed addresses.
+                addresses.retain(|multiaddr| {
+                    multiaddr.iter().any(|p| matches!(p, Protocol::P2pCircuit))
+                });
+            }
+
+            return Ok(addresses);
+        }
+
+        // If the peer id is not self, get the peer addresses from the routing table.
         let (sender, receiver) = oneshot::channel();
         self.send_local_swarm_cmd(LocalSwarmCmd::GetAddressesForPeer { peer_id, sender });
 
