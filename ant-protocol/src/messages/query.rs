@@ -82,7 +82,9 @@ impl Query {
     /// Used to send a query to the close group of the address.
     pub fn dst(&self) -> Option<NetworkAddress> {
         match self {
-            Query::CheckNodeInProblem(address) | Query::GetVersion(address) => Some(address.clone()),
+            Query::CheckNodeInProblem(address) | Query::GetVersion(address) => {
+                Some(address.clone())
+            }
             // Shall not be called for this, as this is a `one-to-one` message,
             // and the destination shall be decided by the requester already.
             Query::GetStoreQuote { key, .. }
