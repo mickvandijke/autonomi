@@ -6,6 +6,7 @@
 // KIND, either express or implied. Please review the Licences for the specific language governing
 // permissions and limitations relating to use of the SAFE Network Software.
 
+use crate::rewards_address_proof::RewardsAddressProof;
 use crate::EvmError;
 use evmlib::{
     common::{Address as RewardsAddress, QuoteHash},
@@ -46,7 +47,7 @@ pub struct ProofOfPayment {
     ///                   |              |             Relayer node to reward if any
     ///                   |              |             |
     ///                   V              V             V
-    pub peer_quotes: Vec<(EncodedPeerId, PaymentQuote, Option<RewardsAddress>)>,
+    pub peer_quotes: Vec<(EncodedPeerId, PaymentQuote, Option<RewardsAddressProof>)>,
 }
 
 impl ProofOfPayment {
@@ -62,12 +63,14 @@ impl ProofOfPayment {
         self.peer_quotes
             .clone()
             .into_iter()
-            .map(|(_, quote, relayer)| {
+            .map(|(_, quote, relayer_rewards_addr_proof)| {
+                let relayer_addr = relayer_rewards_addr_proof.map(|proof| proof.rewards_address);
+
                 (
                     quote.hash(),
                     quote.quoting_metrics,
                     quote.rewards_address,
-                    relayer,
+                    relayer_addr,
                 )
             })
             .collect()

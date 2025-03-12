@@ -38,8 +38,6 @@ pub async fn verify_data_payment(
         .map(interface::IPaymentVault::PaymentVerificationV2::from)
         .collect();
 
-    println!("{:?}", payment_verifications);
-
     let payment_verification_results = payment_vault.verify_payment(payment_verifications).await?;
 
     for payment_verification_result in payment_verification_results {

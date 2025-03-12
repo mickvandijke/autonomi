@@ -8,8 +8,8 @@
 
 use crate::{error::Result, NetworkAddress};
 
-use super::{ChunkProof, RewardsAddressProof};
-use ant_evm::PaymentQuote;
+use super::ChunkProof;
+use ant_evm::{PaymentQuote, RewardsAddressProof};
 use bytes::Bytes;
 use core::fmt;
 use libp2p::Multiaddr;
