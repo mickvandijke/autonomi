@@ -94,21 +94,24 @@ where
     }
 
     /// Verify if payments are valid
-    pub async fn verify_payment<I: IntoIterator<Item: Into<IPaymentVault::PaymentVerification>>>(
+    pub async fn verify_payment<
+        I: IntoIterator<Item: Into<IPaymentVault::PaymentVerificationV2>>,
+    >(
         &self,
         payment_verifications: I,
     ) -> Result<[IPaymentVault::PaymentVerificationResult; 3], Error> {
-        let payment_verifications: Vec<IPaymentVault::PaymentVerification> = payment_verifications
-            .into_iter()
-            .map(|v| v.into())
-            .collect();
+        let payment_verifications: Vec<IPaymentVault::PaymentVerificationV2> =
+            payment_verifications
+                .into_iter()
+                .map(|v| v.into())
+                .collect();
 
         debug!("Verifying payments: {payment_verifications:?}");
 
         let results = retry(
             || async {
                 self.contract
-                    .verifyPayment(payment_verifications.clone())
+                    .verifyPaymentV2(payment_verifications.clone())
                     .call()
                     .await
             },

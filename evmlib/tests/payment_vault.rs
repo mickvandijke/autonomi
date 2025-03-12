@@ -209,7 +209,7 @@ async fn test_verify_payment_on_local() {
 
     let payment_verifications: Vec<_> = quote_payments
         .into_iter()
-        .map(|v| interface::IPaymentVault::PaymentVerification {
+        .map(|v| interface::IPaymentVault::PaymentVerificationV2 {
             metrics: QuotingMetrics {
                 data_size: 0,
                 data_type: 0,

@@ -8,11 +8,11 @@ sol!(
     #[derive(Debug)]
     #[sol(rpc)]
     IPaymentVault,
-    "abi/IPaymentVaultV3.json"
+    "abi/IPaymentVaultV4.json"
 );
 
 impl From<(QuoteHash, QuotingMetrics, Address, Option<Address>)>
-    for IPaymentVault::PaymentVerification
+    for IPaymentVault::PaymentVerificationV2
 {
     fn from(value: (QuoteHash, QuotingMetrics, Address, Option<Address>)) -> Self {
         Self {

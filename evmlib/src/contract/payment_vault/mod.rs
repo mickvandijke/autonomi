@@ -35,8 +35,10 @@ pub async fn verify_data_payment(
 
     let payment_verifications: Vec<_> = payment
         .into_iter()
-        .map(interface::IPaymentVault::PaymentVerification::from)
+        .map(interface::IPaymentVault::PaymentVerificationV2::from)
         .collect();
+
+    println!("{:?}", payment_verifications);
 
     let payment_verification_results = payment_vault.verify_payment(payment_verifications).await?;
 
