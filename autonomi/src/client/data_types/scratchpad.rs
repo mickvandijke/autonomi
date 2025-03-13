@@ -9,6 +9,7 @@
 use crate::client::payment::{PayError, PaymentOption};
 use crate::{client::quote::CostError, Client};
 use crate::{Amount, AttoTokens};
+use ant_evm::ProofOfPaymentV1;
 use ant_networking::{GetRecordError, NetworkError};
 use ant_protocol::storage::{try_serialize_record, RecordKind};
 use ant_protocol::{
@@ -175,7 +176,7 @@ impl Client {
             })?;
 
         // verify payment was successful
-        let (proof, price) = match payment_proofs.get(&xor_name) {
+        let (maybe_proof, price) = match payment_proofs.get(&xor_name) {
             Some((proof, price)) => (Some(proof), price),
             None => {
                 info!("Scratchpad at address: {address:?} was already paid for, update is free");
@@ -184,11 +185,13 @@ impl Client {
         };
         let total_cost = *price;
 
-        let net_addr = NetworkAddress::from_scratchpad_address(*address);
-        let (record, payees) = if let Some(proof) = proof {
+        // prepare the record for network storage
+        let key = NetworkAddress::from_scratchpad_address(*address).to_record_key();
+        let (record, payees) = if let Some(proof) = maybe_proof {
+            // scratchpad is new and needs to be paid for
             let payees = Some(proof.payees());
             let record = Record {
-                key: net_addr.to_record_key(),
+                key: key.clone(),
                 value: try_serialize_record(
                     &(proof, &scratchpad),
                     RecordKind::DataWithPayment(DataTypes::Scratchpad),
@@ -200,8 +203,9 @@ impl Client {
             };
             (record, payees)
         } else {
+            // scratchpad was already paid for
             let record = Record {
-                key: net_addr.to_record_key(),
+                key: key.clone(),
                 value: try_serialize_record(
                     &scratchpad,
                     RecordKind::DataOnly(DataTypes::Scratchpad),
@@ -214,15 +218,57 @@ impl Client {
             (record, None)
         };
 
+        // retro-compatibility with old proof of payment format
+        let (old_storing_nodes, new_storing_nodes) = self
+            .network
+            .split_old_new_nodes(payees.clone().unwrap_or_default())
+            .await?;
+        if let Some(proof) = maybe_proof {
+            let retro_payment = ProofOfPaymentV1::from(proof.clone());
+            let retro_compatible_record = Record {
+                key: key.clone(),
+                value: try_serialize_record(
+                    &(retro_payment, &scratchpad),
+                    RecordKind::DataWithPayment(DataTypes::Scratchpad),
+                )
+                .map_err(|_| ScratchpadError::Serialization)?
+                .to_vec(),
+                publisher: None,
+                expires: None,
+            };
+            if !old_storing_nodes.is_empty() {
+                debug!("Storing scratchpad at address {address:?} to the old nodes");
+                let retro_put_cfg = self
+                    .config
+                    .scratchpad
+                    .put_cfg(Some(old_storing_nodes.clone()));
+                self.network
+                    .put_record(retro_compatible_record, &retro_put_cfg)
+                    .await
+                    .inspect_err(|err| {
+                        error!("Failed to put record - Scratchpad {address:?} to old nodes: {err}")
+                    })?;
+            }
+        }
+
         // store the scratchpad on the network
-        debug!("Storing scratchpad at address {address:?} to the network");
-        let put_cfg = self.config.scratchpad.put_cfg(payees);
-        self.network
-            .put_record(record, &put_cfg)
-            .await
-            .inspect_err(|err| {
-                error!("Failed to put record - scratchpad {address:?} to the network: {err}")
-            })?;
+        if !new_storing_nodes.is_empty() || payees.is_none() {
+            let put_cfg = match payees {
+                Some(_) => self.config.scratchpad.put_cfg(Some(new_storing_nodes)),
+                None => self
+                    .config
+                    .scratchpad
+                    .put_cfg_specific(None, record.clone()),
+            };
+
+            debug!("Storing scratchpad at address {address:?} to the network");
+            self.network
+                .put_record(record, &put_cfg)
+                .await
+                .inspect_err(|err| {
+                    error!("Failed to put record - Scratchpad {address:?} to the network: {err}")
+                })?;
+        }
 
         Ok((total_cost, *address))
     }
@@ -301,7 +347,10 @@ impl Client {
         };
 
         // store the scratchpad on the network
-        let put_cfg = self.config.scratchpad.put_cfg(None);
+        let put_cfg = self
+            .config
+            .scratchpad
+            .put_cfg_specific(None, record.clone());
         debug!("Updating scratchpad at address {address:?} to the network");
         self.network
             .put_record(record, &put_cfg)

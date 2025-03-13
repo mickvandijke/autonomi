@@ -25,13 +25,13 @@ const GET_MARKET_PRICE_BATCH_LIMIT: usize = 2000;
 
 /// A quote for a single address
 #[derive(Debug, Clone, Default)]
-///                                        PeerId of the peer
-///                                        |       Signed quote from the peer
-///                                        |       |             Store cost at this address
-///                                        |       |             |       Relayer node to reward if any
-///                                        |       |             |       |
-///                                        V       V             V       V
 pub struct QuoteForAddress(
+    ///             PeerId of the peer
+    ///             |       Signed quote from the peer
+    ///             |       |             Store cost at this address
+    ///             |       |             |       Relayer node to reward if any
+    ///             |       |             |       |
+    ///             V       V             V       V
     pub(crate) Vec<(PeerId, PaymentQuote, Amount, Option<RewardsAddressProof>)>,
 );
 

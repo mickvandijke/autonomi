@@ -29,11 +29,13 @@ pub use evmlib::Network as EvmNetwork;
 
 mod amount;
 mod data_payments;
+mod data_payments_v1;
 mod error;
 mod rewards_address_proof;
 mod time;
 
 pub use data_payments::{EncodedPeerId, PaymentQuote, ProofOfPayment, QUOTE_EXPIRATION_SECS};
+pub use data_payments_v1::ProofOfPaymentV1;
 pub use evmlib::quoting_metrics::QuotingMetrics;
 pub use rewards_address_proof::RewardsAddressProof;
 

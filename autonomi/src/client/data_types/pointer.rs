@@ -11,7 +11,7 @@ use crate::client::{
     quote::CostError,
     Client,
 };
-use ant_evm::{Amount, AttoTokens, EvmWalletError};
+use ant_evm::{Amount, AttoTokens, EvmWalletError, ProofOfPaymentV1};
 use ant_networking::{GetRecordError, NetworkError};
 use ant_protocol::{
     storage::{try_deserialize_record, try_serialize_record, DataTypes, RecordHeader, RecordKind},
@@ -135,7 +135,7 @@ impl Client {
             })?;
 
         // verify payment was successful
-        let (proof, price) = match payment_proofs.get(&xor_name) {
+        let (maybe_proof, price) = match payment_proofs.get(&xor_name) {
             Some((proof, price)) => (Some(proof), price),
             None => {
                 info!("Pointer at address: {address:?} was already paid for, update is free");
@@ -144,10 +144,13 @@ impl Client {
         };
         let total_cost = *price;
 
-        let (record, payees) = if let Some(proof) = proof {
+        // prepare the record for network storage
+        let key = NetworkAddress::from_pointer_address(address).to_record_key();
+        let (record, payees) = if let Some(proof) = maybe_proof {
+            // pointer is new and needs to be paid for
             let payees = Some(proof.payees());
             let record = Record {
-                key: NetworkAddress::from_pointer_address(address).to_record_key(),
+                key: key.clone(),
                 value: try_serialize_record(
                     &(proof, &pointer),
                     RecordKind::DataWithPayment(DataTypes::Pointer),
@@ -159,8 +162,9 @@ impl Client {
             };
             (record, payees)
         } else {
+            // pointer was already paid for
             let record = Record {
-                key: NetworkAddress::from_pointer_address(address).to_record_key(),
+                key: key.clone(),
                 value: try_serialize_record(&pointer, RecordKind::DataOnly(DataTypes::Pointer))
                     .map_err(|_| PointerError::Serialization)?
                     .to_vec(),
@@ -170,15 +174,51 @@ impl Client {
             (record, None)
         };
 
+        // retro-compatibility with old proof of payment format
+        let (old_storing_nodes, new_storing_nodes) = self
+            .network
+            .split_old_new_nodes(payees.clone().unwrap_or_default())
+            .await?;
+        if let Some(proof) = maybe_proof {
+            let retro_payment = ProofOfPaymentV1::from(proof.clone());
+            let retro_compatible_record = Record {
+                key: key.clone(),
+                value: try_serialize_record(
+                    &(retro_payment, &pointer),
+                    RecordKind::DataWithPayment(DataTypes::Pointer),
+                )
+                .map_err(|_| PointerError::Serialization)?
+                .to_vec(),
+                publisher: None,
+                expires: None,
+            };
+            if !old_storing_nodes.is_empty() {
+                debug!("Storing pointer at address {address:?} to the old nodes");
+                let retro_put_cfg = self.config.pointer.put_cfg(Some(old_storing_nodes.clone()));
+                self.network
+                    .put_record(retro_compatible_record, &retro_put_cfg)
+                    .await
+                    .inspect_err(|err| {
+                        error!("Failed to put record - Pointer {address:?} to old nodes: {err:?}")
+                    })?;
+            }
+        }
+
         // store the pointer on the network
-        debug!("Storing pointer at address {address:?} to the network");
-        let put_cfg = self.config.pointer.put_cfg(payees);
-        self.network
-            .put_record(record, &put_cfg)
-            .await
-            .inspect_err(|err| {
-                error!("Failed to put record - pointer {address:?} to the network: {err}")
-            })?;
+        if !new_storing_nodes.is_empty() || payees.is_none() {
+            let put_cfg = match payees {
+                Some(_) => self.config.pointer.put_cfg(Some(new_storing_nodes)),
+                None => self.config.pointer.put_cfg_specific(None, record.clone()),
+            };
+
+            debug!("Storing pointer at address {address:?} to the network");
+            self.network
+                .put_record(record, &put_cfg)
+                .await
+                .inspect_err(|err| {
+                    error!("Failed to put record - Pointer {address:?} to the network: {err}")
+                })?;
+        }
 
         Ok((total_cost, address))
     }
