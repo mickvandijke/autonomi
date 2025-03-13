@@ -16,7 +16,7 @@ use crate::{
     self_encryption::DataMapLevel,
     Client,
 };
-use ant_evm::{Amount, AttoTokens, ProofOfPayment};
+use ant_evm::{Amount, AttoTokens, ProofOfPayment, ProofOfPaymentV1};
 use ant_networking::NetworkError;
 use ant_protocol::{
     storage::{try_deserialize_record, try_serialize_record, DataTypes, RecordHeader, RecordKind},
@@ -173,42 +173,8 @@ impl Client {
         };
         let total_cost = *price;
 
-        let payees = proof.payees();
-        let record = Record {
-            key: address.to_record_key(),
-            value: try_serialize_record(
-                &(proof, chunk),
-                RecordKind::DataWithPayment(DataTypes::Chunk),
-            )
-            .map_err(|_| {
-                PutError::Serialization("Failed to serialize chunk with payment".to_string())
-            })?
-            .to_vec(),
-            publisher: None,
-            expires: None,
-        };
-
-        let stored_on_node = try_serialize_record(&chunk, RecordKind::DataOnly(DataTypes::Chunk))
-            .map_err(|e| PutError::Serialization(format!("Failed to serialize chunk: {e:?}")))?
-            .to_vec();
-        let target_record = Record {
-            key: address.to_record_key(),
-            value: stored_on_node,
-            publisher: None,
-            expires: None,
-        };
-
-        // store the chunk on the network
-        debug!("Storing chunk at address: {address:?} to the network");
-        let put_cfg = self.config.chunks.chunk_put_cfg(target_record, payees);
-        self.network
-            .put_record(record, &put_cfg)
-            .await
-            .inspect_err(|err| {
-                error!("Failed to put record - chunk {address:?} to the network: {err}")
-            })?;
-
-        Ok((total_cost, *chunk.address()))
+        let address = self.chunk_upload_with_payment(chunk, proof.clone()).await?;
+        Ok((total_cost, address))
     }
 
     /// Get the cost of a chunk.
@@ -337,7 +303,7 @@ impl Client {
         let record_kind = RecordKind::DataWithPayment(DataTypes::Chunk);
         let record = Record {
             key: key.clone(),
-            value: try_serialize_record(&(payment, chunk.clone()), record_kind)
+            value: try_serialize_record(&(payment.clone(), chunk.clone()), record_kind)
                 .map_err(|e| {
                     PutError::Serialization(format!(
                         "Failed to serialize chunk with payment: {e:?}"
@@ -352,19 +318,60 @@ impl Client {
             .map_err(|e| PutError::Serialization(format!("Failed to serialize chunk: {e:?}")))?
             .to_vec();
         let target_record = Record {
-            key,
+            key: key.clone(),
             value: stored_on_node,
             publisher: None,
             expires: None,
         };
+        let address = *chunk.address();
 
-        let put_cfg = self
-            .config
-            .chunks
-            .chunk_put_cfg(target_record, storing_nodes.clone());
-        self.network.put_record(record, &put_cfg).await?;
+        // retro-compatibility with old proof of payment format
+        let (old_storing_nodes, new_storing_nodes) = self
+            .network
+            .split_old_new_nodes(storing_nodes.clone())
+            .await?;
+        let retro_payment = ProofOfPaymentV1::from(payment);
+        let retro_compatible_record = Record {
+            key,
+            value: try_serialize_record(&(retro_payment, chunk.clone()), record_kind)
+                .map_err(|e| {
+                    PutError::Serialization(format!(
+                        "Failed to serialize chunk with payment: {e:?}"
+                    ))
+                })?
+                .to_vec(),
+            publisher: None,
+            expires: None,
+        };
+        if !old_storing_nodes.is_empty() {
+            let retro_put_cfg = self
+                .config
+                .chunks
+                .chunk_put_cfg(target_record.clone(), old_storing_nodes.clone());
+            self.network
+                .put_record(retro_compatible_record, &retro_put_cfg)
+                .await
+                .inspect_err(|err| {
+                    error!("Failed to put record - chunk {address:?} to old nodes: {err:?}")
+                })?;
+        }
+
+        // put the record to the network
+        if !new_storing_nodes.is_empty() {
+            let put_cfg = self
+                .config
+                .chunks
+                .chunk_put_cfg(target_record, new_storing_nodes.clone());
+            self.network
+                .put_record(record, &put_cfg)
+                .await
+                .inspect_err(|err| {
+                    error!("Failed to put record - chunk {address:?} to the network: {err:?}")
+                })?;
+        }
+
         debug!("Successfully stored chunk: {chunk:?} to {storing_nodes:?}");
-        Ok(*chunk.address())
+        Ok(address)
     }
 
     /// Unpack a wrapped data map and fetch all bytes using self-encryption.

@@ -851,6 +851,20 @@ impl Network {
             .map_err(|_e| NetworkError::InternalMsgChannelDropped)
     }
 
+    /// Split old and new nodes
+    /// Old nodes support the old proof of payment format: [`ant_evm::ProofOfPaymentV1`]
+    /// New nodes support the new proof of payment format: [`ant_evm::ProofOfPayment`]
+    /// Returns old nodes and new nodes in a tuple
+    pub async fn split_old_new_nodes(
+        &self,
+        nodes: Vec<PeerId>,
+    ) -> Result<(Vec<PeerId>, Vec<PeerId>)> {
+        // TODO: actually split old and new nodes @mick
+        let old_nodes = vec![];
+        let new_nodes = nodes;
+        Ok((old_nodes, new_nodes))
+    }
+
     /// Notify the node receicced a payment.
     pub fn notify_payment_received(&self) {
         self.send_local_swarm_cmd(LocalSwarmCmd::PaymentReceived);

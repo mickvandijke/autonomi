@@ -13,6 +13,7 @@ use crate::client::Client;
 use crate::client::ClientEvent;
 use crate::client::UploadSummary;
 
+use ant_evm::ProofOfPaymentV1;
 use ant_evm::{Amount, AttoTokens, EvmWalletError};
 use ant_networking::get_graph_entry_from_record;
 use ant_networking::GetRecordError;
@@ -129,9 +130,10 @@ impl Client {
         let total_cost = *price;
 
         // prepare the record for network storage
+        let key = NetworkAddress::from_graph_entry_address(address).to_record_key();
         let payees = proof.payees();
         let record = Record {
-            key: NetworkAddress::from_graph_entry_address(address).to_record_key(),
+            key: key.clone(),
             value: try_serialize_record(
                 &(proof, &entry),
                 RecordKind::DataWithPayment(DataTypes::GraphEntry),
@@ -141,16 +143,47 @@ impl Client {
             publisher: None,
             expires: None,
         };
-        let put_cfg = self.config.graph_entry.put_cfg(Some(payees));
+
+        // retro-compatibility with old proof of payment format
+        let (old_storing_nodes, new_storing_nodes) =
+            self.network.split_old_new_nodes(payees.clone()).await?;
+        let retro_payment = ProofOfPaymentV1::from(proof.clone());
+        let retro_compatible_record = Record {
+            key: key.clone(),
+            value: try_serialize_record(
+                &(retro_payment, &entry),
+                RecordKind::DataWithPayment(DataTypes::GraphEntry),
+            )
+            .map_err(|_| GraphError::Serialization)?
+            .to_vec(),
+            publisher: None,
+            expires: None,
+        };
+        if !old_storing_nodes.is_empty() {
+            debug!("Storing GraphEntry at address {address:?} to the old nodes");
+            let retro_put_cfg = self
+                .config
+                .graph_entry
+                .put_cfg(Some(old_storing_nodes.clone()));
+            self.network
+                .put_record(retro_compatible_record, &retro_put_cfg)
+                .await
+                .inspect_err(|err| {
+                    error!("Failed to put record - GraphEntry {address:?} to old nodes: {err}")
+                })?;
+        }
 
         // put the record to the network
         debug!("Storing GraphEntry at address {address:?} to the network");
-        self.network
-            .put_record(record, &put_cfg)
-            .await
-            .inspect_err(|err| {
-                error!("Failed to put record - GraphEntry {address:?} to the network: {err}")
-            })?;
+        if !new_storing_nodes.is_empty() {
+            let put_cfg = self.config.graph_entry.put_cfg(Some(new_storing_nodes));
+            self.network
+                .put_record(record, &put_cfg)
+                .await
+                .inspect_err(|err| {
+                    error!("Failed to put record - GraphEntry {address:?} to the network: {err}")
+                })?;
+        }
 
         // send client event
         if let Some(channel) = self.client_event_sender.as_ref() {
