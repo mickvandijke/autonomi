@@ -15,6 +15,7 @@ use crate::RunningNode;
 use ant_bootstrap::BootstrapCacheStore;
 use ant_evm::RewardsAddress;
 use ant_evm::{EvmNetwork, RewardsAddressProof};
+use ant_networking::Addresses;
 #[cfg(feature = "open-metrics")]
 use ant_networking::MetricsRegistries;
 use ant_networking::{
@@ -871,7 +872,7 @@ impl Node {
     /// This will challenge all closest peers at once.
     async fn storage_challenge(network: Network) {
         let start = Instant::now();
-        let closest_peers: Vec<PeerId> =
+        let closest_peers: Vec<(PeerId, Addresses)> =
             if let Ok(closest_peers) = network.get_closest_k_value_local_peers().await {
                 closest_peers
                     .into_iter()
@@ -939,7 +940,7 @@ impl Node {
         });
 
         let mut tasks = JoinSet::new();
-        for peer_id in closest_peers {
+        for (peer_id, addresses) in closest_peers {
             if peer_id == network.peer_id() {
                 continue;
             }
@@ -947,9 +948,13 @@ impl Node {
             let request_clone = request.clone();
             let expected_proofs_clone = expected_proofs.clone();
             let _ = tasks.spawn(async move {
-                let res =
-                    scoring_peer(network_clone, peer_id, request_clone, expected_proofs_clone)
-                        .await;
+                let res = scoring_peer(
+                    network_clone,
+                    (peer_id, addresses),
+                    request_clone,
+                    expected_proofs_clone,
+                )
+                .await;
                 (peer_id, res)
             });
         }
@@ -1000,7 +1005,7 @@ impl Node {
                 if peers.len() >= CLOSE_GROUP_SIZE {
                     // Calculate the distance to the farthest.
                     let distance =
-                        target.distance(&NetworkAddress::from_peer(peers[CLOSE_GROUP_SIZE - 1]));
+                        target.distance(&NetworkAddress::from_peer(peers[CLOSE_GROUP_SIZE - 1].0));
                     network.add_network_density_sample(distance);
                 }
             }
@@ -1012,13 +1017,14 @@ impl Node {
 
 async fn scoring_peer(
     network: Network,
-    peer_id: PeerId,
+    peer: (PeerId, Addresses),
     request: Request,
     expected_proofs: HashMap<NetworkAddress, ChunkProof>,
 ) -> usize {
+    let peer_id = peer.0;
     let start = Instant::now();
     let responses = network
-        .send_and_get_responses(&[peer_id], &request, true)
+        .send_and_get_responses(&[peer], &request, true)
         .await;
 
     if let Some(Ok(Response::Query(QueryResponse::GetChunkExistenceProof(answers)))) =

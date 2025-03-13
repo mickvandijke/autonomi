@@ -7,6 +7,7 @@ The Autonomi client library provides Python bindings for easy integration with P
 We recommend using `uv` for Python environment management:
 
 Make sure you have installed:
+
 - `Python`
 - `uv`
 
@@ -96,6 +97,60 @@ The main interface to interact with the Autonomi network.
 - `pointer_cost(key: VaultSecretKey) -> str`
   - Calculate pointer storage cost
   - Returns cost in atto tokens
+
+#### Scratchpad
+
+Manage mutable encrypted data on the network.
+
+#### Scratchpad Class
+
+- `Scratchpad(owner: SecretKey, data_encoding: int, unencrypted_data: bytes, counter: int) -> Scratchpad`
+  - Create a new scratchpad instance
+  - `owner`: Secret key for encrypting and signing
+  - `data_encoding`: Custom value to identify data type (app-defined)
+  - `unencrypted_data`: Raw data to be encrypted
+  - `counter`: Version counter for tracking updates
+
+- `address() -> ScratchpadAddress`
+  - Get the address of the scratchpad
+
+- `decrypt_data(sk: SecretKey) -> bytes`
+  - Decrypt the data using the given secret key
+
+#### Client Methods for Scratchpad
+
+- `scratchpad_get_from_public_key(public_key: PublicKey) -> Scratchpad`
+  - Retrieve a scratchpad using owner's public key
+  
+- `scratchpad_get(addr: ScratchpadAddress) -> Scratchpad`
+  - Retrieve a scratchpad by its address
+  
+- `scratchpad_check_existance(addr: ScratchpadAddress) -> bool`
+  - Check if a scratchpad exists on the network
+  
+- `scratchpad_put(scratchpad: Scratchpad, payment: PaymentOption) -> Tuple[str, ScratchpadAddress]`
+  - Store a scratchpad on the network
+  - Returns (cost, address)
+  
+- `scratchpad_create(owner: SecretKey, content_type: int, initial_data: bytes, payment: PaymentOption) -> Tuple[str, ScratchpadAddress]`
+  - Create a new scratchpad with a counter of 0
+  - Returns (cost, address)
+  
+- `scratchpad_update(owner: SecretKey, content_type: int, data: bytes) -> None`
+  - Update an existing scratchpad
+  - **Note**: Counter is automatically incremented by 1 during update
+  - The scratchpad must exist before updating
+  
+- `scratchpad_cost(public_key: PublicKey) -> str`
+  - Calculate the cost to store a scratchpad
+  - Returns cost in atto tokens
+
+#### Important Notes on Scratchpad Counter
+
+1. When creating a new scratchpad with `scratchpad_create`, the counter starts at 0
+2. When updating with `scratchpad_update`, the counter is automatically incremented
+3. If you need to set a specific counter value, create a new Scratchpad instance and use `scratchpad_put`
+4. Only the scratchpad with the highest counter is kept on the network when there are conflicts
 
 #### Vault Operations
 
@@ -211,11 +266,13 @@ Handle private data storage references.
 ## Examples
 
 See the `examples/` directory for complete examples:
+
 - `autonomi_example.py`: Basic data operations
 - `autonomi_pointers.py`: Working with pointers
 - `autonomi_vault.py`: Vault operations
 - `autonomi_private_data.py`: Private data handling
 - `autonomi_private_encryption.py`: Data encryption
+- `autonomi_scratchpad.py`: Scratchpad creation and updates (with counter management)
 - `autonomi_advanced.py`: Advanced usage scenarios
 
 ## Best Practices
