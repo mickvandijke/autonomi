@@ -400,7 +400,9 @@ impl Network {
     ) -> Result<RewardsAddressProof> {
         let request = Request::Query(Query::GetRewardsAddress);
 
-        let response = self.send_request(request, peer_id).await;
+        let response = self
+            .send_request(request, peer_id, Default::default())
+            .await;
 
         match response {
             Ok(Response::Query(QueryResponse::GetRewardsAddress(rewards_address_proof))) => {

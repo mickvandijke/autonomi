@@ -58,7 +58,7 @@ xor_name = "5.0.0"
 alloy = { version = "0.7.3", default-features = false, features = ["contract", "json-rpc", "network", "node-bindings", "provider-http", "reqwest-rustls-tls", "rpc-client", "rpc-types", "signer-local", "std"] }
 ant-node = { path = "../ant-node", version = "0.3.8" }
 ant-logging = { path = "../ant-logging", version = "0.2.48" }
-evmlib = { path = "../evmlib", version = "0.1.9" }
+evmlib = { path = "../evmlib", version = "0.2.0" }
 eyre = "0.6.5"
 serial_test = "3.2.0"
 sha2 = "0.10.6"
