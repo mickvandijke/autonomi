@@ -8,8 +8,7 @@ use alloy::providers::ext::AnvilApi;
 use alloy::providers::{ProviderBuilder, WalletProvider};
 use alloy::signers::local::{LocalSigner, PrivateKeySigner};
 use evmlib::common::{Amount, TxHash};
-use evmlib::contract::payment_vault::{verify_data_payment, MAX_TRANSFERS_PER_TRANSACTION};
-use evmlib::quoting_metrics::QuotingMetrics;
+use evmlib::contract::payment_vault::MAX_TRANSFERS_PER_TRANSACTION;
 use evmlib::testnet::{deploy_data_payments_contract, deploy_network_token_contract, start_node};
 use evmlib::transaction_config::TransactionConfig;
 use evmlib::wallet::{transfer_tokens, wallet_address, Wallet};
@@ -65,4 +64,25 @@ async fn funded_wallet(network: &Network, genesis_wallet: EthereumWallet) -> Wal
     .unwrap();
 
     Wallet::new(network.clone(), wallet)
+}
+
+#[tokio::test]
+async fn test_pay_for_quotes_batching() {
+    const TRANSFERS: usize = 600;
+    let (_anvil, network, genesis_wallet) = local_testnet().await;
+    let wallet = funded_wallet(&network, genesis_wallet).await;
+    let mut quote_payments = vec![];
+
+    for _ in 0..TRANSFERS {
+        let quote = random_quote_payment();
+        quote_payments.push(quote);
+    }
+
+    let tx_hashes = wallet.pay_for_quotes(quote_payments.clone()).await.unwrap();
+    let unique_tx_hashes: HashSet<TxHash> = tx_hashes.values().cloned().collect();
+
+    assert_eq!(
+        unique_tx_hashes.len(),
+        TRANSFERS.div_ceil(MAX_TRANSFERS_PER_TRANSACTION)
+    );
 }
