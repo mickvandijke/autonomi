@@ -1,3 +1,4 @@
+use ant_bootstrap::InitialPeersConfig;
 use ant_node::spawn::network_spawner::NetworkSpawner;
 use autonomi::{Client, ClientConfig, ClientOperatingStrategy, RewardsAddress};
 use evmlib::testnet::Testnet;
@@ -31,8 +32,15 @@ async fn get_rewards_address_proof() {
         .clone();
 
     let config = ClientConfig {
-        local: true,
-        peers: Some(vec![bootstrap_peer]),
+        init_peers_config: InitialPeersConfig {
+            first: false,
+            addrs: vec![bootstrap_peer],
+            network_contacts_url: vec![],
+            local: true,
+            disable_mainnet_contacts: true,
+            ignore_cache: true,
+            bootstrap_cache_dir: None,
+        },
         evm_network,
         strategy: ClientOperatingStrategy::default(),
     };

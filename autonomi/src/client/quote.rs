@@ -74,12 +74,14 @@ impl StoreQuote {
 pub enum CostError {
     #[error("Failed to self-encrypt data.")]
     SelfEncryption(#[from] crate::self_encryption::Error),
-    #[error("Could not get store quote for: {0:?} after several retries")]
-    CouldNotGetStoreQuote(XorName),
-    #[error("Could not get store costs: {0:?}")]
-    CouldNotGetStoreCosts(NetworkError),
-    #[error("Not enough node quotes for {0:?}, got: {1:?} and need at least {2:?}")]
-    NotEnoughNodeQuotes(XorName, usize, usize),
+    #[error(
+        "Not enough node quotes for {content_addr:?}, got: {got:?} and need at least {required:?}"
+    )]
+    NotEnoughNodeQuotes {
+        content_addr: XorName,
+        got: usize,
+        required: usize,
+    },
     #[error("Failed to serialize {0}")]
     Serialization(String),
     #[error("Market price error: {0:?}")]
@@ -109,7 +111,7 @@ impl Client {
             .into_iter()
             .map(|(content_addr, data_size)| {
                 fetch_store_quote_with_retries(
-                    &self.network,
+                    self.network.clone(),
                     content_addr,
                     data_type.get_index(),
                     data_size,
@@ -213,11 +215,12 @@ impl Client {
                     ]),
                 );
             } else {
-                return Err(CostError::NotEnoughNodeQuotes(
+                error!("Not enough quotes for content_addr: {content_addr}, got: {} and need at least {MINIMUM_QUOTES_TO_PAY}", quotes.0.len());
+                return Err(CostError::NotEnoughNodeQuotes {
                     content_addr,
-                    quotes.0.len(),
-                    MINIMUM_QUOTES_TO_PAY,
-                ));
+                    got: quotes.0.len(),
+                    required: MINIMUM_QUOTES_TO_PAY,
+                });
             }
         }
 
@@ -251,7 +254,7 @@ async fn fetch_store_quote(
 
 /// Fetch a store quote for a content address with a retry strategy.
 async fn fetch_store_quote_with_retries(
-    network: &Network,
+    network: Network,
     content_addr: XorName,
     data_type: u32,
     data_size: usize,
@@ -265,7 +268,7 @@ async fn fetch_store_quote_with_retries(
     let mut retries = 0;
 
     loop {
-        match fetch_store_quote(network, content_addr, data_type, data_size).await {
+        match fetch_store_quote(&network, content_addr, data_type, data_size).await {
             Ok(quote) => {
                 if quote.is_empty() {
                     // Empty quotes indicates the record already exists.
@@ -276,7 +279,11 @@ async fn fetch_store_quote_with_retries(
                     error!("Error while fetching store quote: not enough quotes ({}/{CLOSE_GROUP_SIZE}), retry #{retries}, quotes {quote:?}",
                         quote.len());
                     if retries > 2 {
-                        break Err(CostError::CouldNotGetStoreQuote(content_addr));
+                        break Err(CostError::NotEnoughNodeQuotes {
+                            content_addr,
+                            got: quote.len(),
+                            required: CLOSE_GROUP_SIZE,
+                        });
                     }
                 }
                 break Ok((content_addr, quote));
@@ -289,7 +296,11 @@ async fn fetch_store_quote_with_retries(
                 error!(
                     "Error while fetching store quote: {err:?}, stopping after {retries} retries"
                 );
-                break Err(CostError::CouldNotGetStoreQuote(content_addr));
+                break Err(CostError::NotEnoughNodeQuotes {
+                    content_addr,
+                    got: 0,
+                    required: CLOSE_GROUP_SIZE,
+                });
             }
         }
         // Shall have a sleep between retries to avoid choking the network.
