@@ -30,9 +30,12 @@ pub use evmlib::Network as EvmNetwork;
 mod amount;
 mod data_payments;
 mod error;
+mod rewards_address_proof;
+mod time;
 
 pub use data_payments::{EncodedPeerId, PaymentQuote, ProofOfPayment, QUOTE_EXPIRATION_SECS};
 pub use evmlib::quoting_metrics::QuotingMetrics;
+pub use rewards_address_proof::RewardsAddressProof;
 
 /// Types used in the public API
 pub use amount::{Amount, AttoTokens};

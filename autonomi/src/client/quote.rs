@@ -10,9 +10,8 @@ use super::Client;
 use crate::client::high_level::files::FILE_UPLOAD_BATCH_SIZE;
 use crate::client::utils::process_tasks_with_max_concurrency;
 use ant_evm::payment_vault::get_market_price;
-use ant_evm::{Amount, EvmAddress, PaymentQuote, QuotePayment, QuotingMetrics};
+use ant_evm::{Amount, PaymentQuote, QuotePayment, QuotingMetrics, RewardsAddressProof};
 use ant_networking::{Network, NetworkError};
-use ant_protocol::messages::RewardsAddressProof;
 pub use ant_protocol::storage::DataTypes;
 use ant_protocol::{storage::ChunkAddress, NetworkAddress, CLOSE_GROUP_SIZE};
 use libp2p::PeerId;
@@ -32,7 +31,9 @@ const GET_MARKET_PRICE_BATCH_LIMIT: usize = 2000;
 ///                                        |       |             |       Relayer node to reward if any
 ///                                        |       |             |       |
 ///                                        V       V             V       V
-pub struct QuoteForAddress(pub(crate) Vec<(PeerId, PaymentQuote, Amount, Option<EvmAddress>)>);
+pub struct QuoteForAddress(
+    pub(crate) Vec<(PeerId, PaymentQuote, Amount, Option<RewardsAddressProof>)>,
+);
 
 impl QuoteForAddress {
     pub fn price(&self) -> Amount {
@@ -59,8 +60,9 @@ impl StoreQuote {
     pub fn payments(&self) -> Vec<QuotePayment> {
         let mut quote_payments = vec![];
         for (_address, quote) in self.0.iter() {
-            for (_peer, quote, price, relay_addr) in quote.0.iter() {
-                quote_payments.push((quote.hash(), quote.rewards_address, *relay_addr, *price));
+            for (_peer, quote, price, relay_addr_proof) in quote.0.iter() {
+                let relay_addr = relay_addr_proof.clone().map(|proof| proof.rewards_address);
+                quote_payments.push((quote.hash(), quote.rewards_address, relay_addr, *price));
             }
         }
         quote_payments
@@ -94,7 +96,15 @@ impl Client {
         &self,
         data_type: DataTypes,
         content_addrs: impl Iterator<Item = (XorName, usize)>,
-    ) -> Vec<Result<(XorName, Vec<(PeerId, PaymentQuote, Option<EvmAddress>)>), CostError>> {
+    ) -> Vec<
+        Result<
+            (
+                XorName,
+                Vec<(PeerId, PaymentQuote, Option<RewardsAddressProof>)>,
+            ),
+            CostError,
+        >,
+    > {
         let futures: Vec<_> = content_addrs
             .into_iter()
             .map(|(content_addr, data_size)| {
@@ -161,14 +171,19 @@ impl Client {
             all_prices.extend(batch_prices);
         }
 
-        let quotes_with_prices: Vec<(XorName, PeerId, PaymentQuote, Amount, Option<EvmAddress>)> =
-            all_quotes
-                .into_iter()
-                .zip(all_prices.into_iter())
-                .map(|((content_addr, peer_id, quote, relay_addr), price)| {
-                    (content_addr, peer_id, quote, price, relay_addr)
-                })
-                .collect();
+        let quotes_with_prices: Vec<(
+            XorName,
+            PeerId,
+            PaymentQuote,
+            Amount,
+            Option<RewardsAddressProof>,
+        )> = all_quotes
+            .into_iter()
+            .zip(all_prices.into_iter())
+            .map(|((content_addr, peer_id, quote, relay_addr), price)| {
+                (content_addr, peer_id, quote, price, relay_addr)
+            })
+            .collect();
 
         let mut quotes_per_addr: HashMap<XorName, QuoteForAddress> = HashMap::new();
 
@@ -190,8 +205,8 @@ impl Client {
                 quotes_to_pay_per_addr.insert(
                     content_addr,
                     QuoteForAddress(vec![
-                        (*p1, q1.clone(), Amount::ZERO, *r1),
-                        (*p2, q2.clone(), Amount::ZERO, *r2),
+                        (*p1, q1.clone(), Amount::ZERO, r1.clone()),
+                        (*p2, q2.clone(), Amount::ZERO, r2.clone()),
                         quotes.0[2].clone(),
                         quotes.0[3].clone(),
                         quotes.0[4].clone(),
@@ -223,7 +238,7 @@ async fn fetch_store_quote(
     content_addr: XorName,
     data_type: u32,
     data_size: usize,
-) -> Result<Vec<(PeerId, PaymentQuote, Option<EvmAddress>)>, NetworkError> {
+) -> Result<Vec<(PeerId, PaymentQuote, Option<RewardsAddressProof>)>, NetworkError> {
     network
         .get_store_quote_from_network(
             NetworkAddress::from_chunk_address(ChunkAddress::new(content_addr)),
@@ -240,7 +255,13 @@ async fn fetch_store_quote_with_retries(
     content_addr: XorName,
     data_type: u32,
     data_size: usize,
-) -> Result<(XorName, Vec<(PeerId, PaymentQuote, Option<EvmAddress>)>), CostError> {
+) -> Result<
+    (
+        XorName,
+        Vec<(PeerId, PaymentQuote, Option<RewardsAddressProof>)>,
+    ),
+    CostError,
+> {
     let mut retries = 0;
 
     loop {

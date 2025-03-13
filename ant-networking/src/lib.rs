@@ -50,8 +50,7 @@ pub use metrics::service::MetricsRegistries;
 pub use time::{interval, sleep, spawn, Instant, Interval};
 
 use self::{cmd::NetworkSwarmCmd, error::Result};
-use ant_evm::{EvmAddress, PaymentQuote, QuotingMetrics};
-use ant_protocol::messages::RewardsAddressProof;
+use ant_evm::{EvmAddress, PaymentQuote, QuotingMetrics, RewardsAddressProof};
 use ant_protocol::{
     error::Error as ProtocolError,
     messages::{ChunkProof, Nonce, Query, QueryResponse, Request, Response},
@@ -419,7 +418,7 @@ impl Network {
         //   |       |             Relayer node to reward if any
         //   |       |             |
         //   V       V             V
-        Vec<(PeerId, PaymentQuote, Option<EvmAddress>)>,
+        Vec<(PeerId, PaymentQuote, Option<RewardsAddressProof>)>,
     > {
         // The requirement of having at least CLOSE_GROUP_SIZE
         // close nodes will be checked internally automatically.
@@ -503,7 +502,7 @@ impl Network {
                     };
 
                     // Check if we need to reward a relayer node too
-                    let relay_addr = if let Some(relay_peer_id) =
+                    let relay_addr_proof = if let Some(relay_peer_id) =
                         get_relay_peer_if_any(peer_multiaddr)
                     {
                         info!("Peer {peer:?} is relayed through {relay_peer_id:?}, getting rewards address for the relayer to reward it too");
@@ -517,13 +516,17 @@ impl Network {
                             warn!("Peer {peer_address:?} is relayed. Received expired rewards address proof from the relay peer {relay_peer_id:?}");
                             continue;
                         }
-                        Some(rewards_address_proof.rewards_address)
+                        Some(rewards_address_proof)
                     } else {
                         None
                     };
 
-                    all_quotes.push((peer_address.clone(), quote.clone(), relay_addr));
-                    quotes_to_pay.push((peer, quote, relay_addr));
+                    all_quotes.push((
+                        peer_address.clone(),
+                        quote.clone(),
+                        relay_addr_proof.clone(),
+                    ));
+                    quotes_to_pay.push((peer, quote, relay_addr_proof));
                 }
                 Ok(Response::Query(QueryResponse::GetStoreQuote {
                     quote: Err(ProtocolError::RecordExists(_)),

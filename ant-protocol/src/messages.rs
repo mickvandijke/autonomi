@@ -12,7 +12,6 @@ mod cmd;
 mod node_id;
 mod query;
 mod response;
-mod rewards_address;
 
 pub use self::{
     chunk_proof::{ChunkProof, Nonce},
@@ -20,7 +19,6 @@ pub use self::{
     node_id::NodeId,
     query::Query,
     response::{CmdResponse, QueryResponse},
-    rewards_address::RewardsAddressProof,
 };
 
 use super::NetworkAddress;

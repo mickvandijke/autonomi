@@ -677,7 +677,7 @@ impl Node {
         }
 
         // verify if the payees are behind a relay node, and if so confirm the relayer node's reward address
-        for (peer, _quote, relayer_addr) in payment.peer_quotes.iter() {
+        for (peer, _quote, relayer_rewards_addr_proof) in payment.peer_quotes.iter() {
             let peer_id = peer.to_peer_id().map_err(|e| {
                 Error::InvalidRequest(format!(
                     "Invalid peer id in payment for record {pretty_key}: {e}"
@@ -713,31 +713,43 @@ impl Node {
                 .filter_map(ant_networking::get_relay_peer_if_any)
                 .collect();
 
-            // todo: Optimize this by including the full rewards address proof in the payment.
-            // Obtain reward addresses for relay peers.
-            let mut relay_peers_reward_addresses = vec![];
-            for relay_peer in relay_peers {
-                let relay_peer_reward_address =
-                    self.network().get_rewards_address(relay_peer).await?;
-                relay_peers_reward_addresses.push(relay_peer_reward_address);
-            }
-
             // We expect a relayer peer to be paid here.
-            if !relay_peers_reward_addresses.is_empty() {
-                if let Some(relayer_rewards_addr) = relayer_addr {
-                    // Check if the paid relayer address was valid.
-                    if !relay_peers_reward_addresses.contains(relayer_rewards_addr) {
-                        warn!("Payment quote has wrong relayer rewards address for record {pretty_key}, expected {relayer_rewards_addr:?}, got {relayer_addr:?}");
+            if !relay_peers.is_empty() {
+                if let Some(relayer_rewards_addr_proof) = relayer_rewards_addr_proof {
+                    if !relayer_rewards_addr_proof.is_signature_valid() {
+                        warn!("Signature validation failed for relayer rewards address proof for record {pretty_key}");
                         return Err(Error::InvalidRequest(format!(
-                            "Payment quote has wrong relayer rewards address for record {pretty_key}, expected {relayer_rewards_addr:?}, got {relayer_addr:?}"
+                            "Signature validation failed for relayer rewards address proof for record {pretty_key}"
+                        )));
+                    }
+
+                    if relayer_rewards_addr_proof.is_expired() {
+                        warn!("Relayer rewards address proof has expired for record {pretty_key}");
+                        return Err(Error::InvalidRequest(format!(
+                            "Relayer rewards address proof has expired for record {pretty_key}"
+                        )));
+                    }
+
+                    let proof_peer_id = relayer_rewards_addr_proof.to_peer_id().ok_or_else(|| {
+                        warn!("Relayer rewards address proof has invalid peer id for record {pretty_key}");
+                        Error::InvalidRequest(format!(
+                            "Relayer rewards address proof has invalid peer id for record {pretty_key}"
+                        ))
+                    })?;
+
+                    // Check if the paid relayer address was valid.
+                    if !relay_peers.contains(&proof_peer_id) {
+                        warn!("Relayer rewards address proof has ineligible relayer peer for record {pretty_key}, expected {relay_peers:?}, got {proof_peer_id:?}");
+                        return Err(Error::InvalidRequest(format!(
+                            "Relayer rewards address proof has ineligible relayer peer for record {pretty_key}, expected {relay_peers:?}, got {proof_peer_id:?}"
                         )));
                     }
                 } else {
                     warn!(
-                        "Payment quote is missing relayer rewards address for record {pretty_key}"
+                        "Payment quote is missing relayer rewards address proof for record {pretty_key}"
                     );
                     return Err(Error::InvalidRequest(format!(
-                        "Payment quote is missing relayer rewards address for record {pretty_key}"
+                        "Payment quote is missing relayer rewards address proof for record {pretty_key}"
                     )));
                 }
             }

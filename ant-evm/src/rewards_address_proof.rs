@@ -1,15 +1,15 @@
 use crate::time::time_in_secs_since_unix_epoch;
-use ant_evm::RewardsAddress;
+use evmlib::common::Address;
 use libp2p::identity::Keypair;
 use serde::{Deserialize, Serialize};
 
 const REWARDS_PROOF_VALID_FOR_SECS: u64 = 172800; // 172800 secs is 48 hours
 
 /// Rewards address with expiration date and signature signed by the providing node.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Debug)]
 pub struct RewardsAddressProof {
     /// Rewards address of the node.
-    pub rewards_address: RewardsAddress,
+    pub rewards_address: Address,
     /// Expiration date of the rewards address proof.
     pub date_expiration: u64,
     /// pub key of the node.
@@ -19,7 +19,7 @@ pub struct RewardsAddressProof {
 }
 
 impl RewardsAddressProof {
-    pub fn sign_new(rewards_address: RewardsAddress, keypair: &Keypair) -> Self {
+    pub fn sign_new(rewards_address: Address, keypair: &Keypair) -> Self {
         let date_now = time_in_secs_since_unix_epoch();
         let date_expiration = date_now.saturating_add(REWARDS_PROOF_VALID_FOR_SECS);
 
@@ -85,15 +85,15 @@ impl RewardsAddressProof {
 
 #[cfg(test)]
 mod tests {
-    use crate::messages::RewardsAddressProof;
-    use ant_evm::RewardsAddress;
+    use crate::rewards_address_proof::RewardsAddressProof;
+    use evmlib::common::Address;
     use libp2p::identity::{Keypair, PublicKey};
 
     #[test]
     fn test_rewards_address_proof_creation() {
         let keypair = Keypair::generate_ed25519();
         let peer_id = keypair.public().to_peer_id();
-        let rewards_address = RewardsAddress::new([1u8; 20]);
+        let rewards_address = Address::new([1u8; 20]);
 
         let proof = RewardsAddressProof::sign_new(rewards_address, &keypair);
 
