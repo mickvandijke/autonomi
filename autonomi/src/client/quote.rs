@@ -90,10 +90,10 @@ impl Client {
         peer: PeerId,
         addresses: Addresses,
     ) -> Result<Option<(PeerId, PaymentQuote)>, CostError> {
-        debug!(
-            "Fetching raw quote from node: {} for content address: {:?}",
-            peer, content_addr
-        );
+        // debug!(
+        //     "Fetching raw quote from node: {} for content address: {:?}",
+        //     peer, content_addr
+        // );
 
         // Initiate a request to fetch the quote from the target peer
         let result = self
@@ -107,7 +107,7 @@ impl Client {
             )
             .await
             .map_err(|err| {
-                debug!("Error fetching quote from peer {}: {:?}", peer, err);
+                error!("Error fetching quote from peer {}: {:?}", peer, err);
                 CostError::NotEnoughNodeQuotes {
                     content_addr,
                     got: 0,
