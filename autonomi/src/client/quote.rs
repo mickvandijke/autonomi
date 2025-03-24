@@ -11,7 +11,7 @@ use crate::client::high_level::files::FILE_UPLOAD_BATCH_SIZE;
 use crate::client::utils::process_tasks_with_max_concurrency;
 use ant_evm::payment_vault::get_market_price;
 use ant_evm::{Amount, PaymentQuote, QuotePayment, QuotingMetrics};
-use ant_networking::{Network, NetworkError};
+use ant_networking::{Addresses, Network, NetworkError};
 use ant_protocol::{storage::ChunkAddress, NetworkAddress, CLOSE_GROUP_SIZE};
 use libp2p::PeerId;
 use std::collections::HashMap;
@@ -82,6 +82,42 @@ pub enum CostError {
 }
 
 impl Client {
+    /// Fetch a single raw quote from a node.
+    pub async fn get_raw_quote_from_node(
+        &self,
+        content_addr: XorName,
+        data_type: DataTypes,
+        peer: PeerId,
+        addresses: Addresses,
+    ) -> Result<Option<(PeerId, PaymentQuote)>, CostError> {
+        debug!(
+            "Fetching raw quote from node: {} for content address: {:?}",
+            peer, content_addr
+        );
+
+        // Initiate a request to fetch the quote from the target peer
+        let result = self
+            .network
+            .get_store_quote_from_node(
+                peer,
+                addresses,
+                content_addr.into(),
+                data_type.get_index(),
+                0,
+            )
+            .await
+            .map_err(|err| {
+                debug!("Error fetching quote from peer {}: {:?}", peer, err);
+                CostError::NotEnoughNodeQuotes {
+                    content_addr,
+                    got: 0,
+                    required: 1,
+                }
+            })?;
+
+        Ok(result)
+    }
+
     /// Get raw quotes from nodes.
     /// These quotes do not include actual record prices.
     /// You will likely want to use `get_store_quotes` instead.

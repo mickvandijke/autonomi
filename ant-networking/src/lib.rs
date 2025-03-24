@@ -504,6 +504,85 @@ impl Network {
         Ok(quotes_to_pay)
     }
 
+    /// Fetches a `StoreQuote` from a specific node.
+    pub async fn get_store_quote_from_node(
+        &self,
+        peer: PeerId,
+        addresses: Addresses,
+        record_address: NetworkAddress,
+        data_type: u32,
+        data_size: usize,
+    ) -> Result<Option<(PeerId, PaymentQuote)>> {
+        let request = Request::Query(Query::GetStoreQuote {
+            key: record_address,
+            data_type,
+            data_size,
+            nonce: None,
+            difficulty: 0,
+        });
+
+        info!("Sending GetStoreQuote request to peer {peer:?}");
+
+        let response = self
+            .send_request(request, peer, addresses)
+            .await
+            .map_err(|err| {
+                error!("Failed to request StoreQuote from peer {peer:?}, error: {err:?}");
+                err
+            });
+
+        match response {
+            Ok((
+                Response::Query(QueryResponse::GetStoreQuote {
+                    quote: Ok(quote),
+                    peer_address,
+                    storage_proofs,
+                }),
+                _conn_info,
+            )) => {
+                if !storage_proofs.is_empty() {
+                    debug!("Storage proofing during GetStoreQuote to be implemented.");
+                }
+
+                // Check the quote itself is valid.
+                if !quote.check_is_signed_by_claimed_peer(peer) {
+                    warn!("Received invalid quote from {peer_address:?}, {quote:?}");
+                    return Err(NetworkError::NoStoreCostResponses);
+                }
+
+                // Check if the returned data type matches the request
+                if quote.quoting_metrics.data_type != data_type {
+                    warn!("Received invalid quote from {peer_address:?}, {quote:?}. Data type did not match the request.");
+                    return Err(NetworkError::NoStoreCostResponses);
+                }
+
+                Ok(Some((peer, quote)))
+            }
+            Ok((
+                Response::Query(QueryResponse::GetStoreQuote {
+                    quote: Err(ProtocolError::RecordExists(_)),
+                    peer_address: _,
+                    storage_proofs,
+                }),
+                _conn_info,
+            )) => {
+                if !storage_proofs.is_empty() {
+                    debug!("Storage proofing during GetStoreQuote to be implemented.");
+                }
+
+                Ok(None)
+            }
+            Err(err) => {
+                error!("Got an error while requesting quote from peer {peer:?}: {err:?}");
+                Err(NetworkError::NoStoreCostResponses)
+            }
+            _ => {
+                error!("Got an unexpected response while requesting quote from peer {peer:?}: {response:?}");
+                Err(NetworkError::NoStoreCostResponses)
+            }
+        }
+    }
+
     /// Get the Record from the network
     /// Carry out re-attempts if required
     /// In case a target_record is provided, only return when fetched target.
