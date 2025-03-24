@@ -449,7 +449,7 @@ impl Node {
                 // try query peer version
                 let network = self.network().clone();
                 let _handle = spawn(async move {
-                    Self::try_query_peer_version(network, peer_id).await;
+                    Self::try_update_peer_version_cache(network, peer_id).await;
                 });
 
                 // try replication here
@@ -974,26 +974,12 @@ impl Node {
     }
 
     /// Query peer's version and update local knowledge.
-    async fn try_query_peer_version(network: Network, peer: PeerId) {
-        let request = Request::Query(Query::GetVersion(NetworkAddress::from(peer)));
-        // We can skip passing `addrs` here as the new peer should be part of the kad::RT and swarm can get the addr.
-        let version = match network
-            .send_request(request, peer, Default::default())
-            .await
-        {
-            Ok((Response::Query(QueryResponse::GetVersion { version, .. }), _conn_info)) => {
-                info!("Fetched peer {peer:?} version as {version:?}");
-                version
-            }
-            Ok(other) => {
-                info!("Not a version fetched from peer {peer:?}, {other:?}");
-                "none".to_string()
-            }
-            Err(err) => {
-                info!("Failed to fetch version from peer {peer:?} with error {err:?}");
-                "old".to_string()
-            }
+    async fn try_update_peer_version_cache(network: Network, peer: PeerId) {
+        let version = match network.get_node_version(peer, Default::default()).await {
+            Ok(version) => version.to_string(),
+            Err(err) => err,
         };
+
         network.notify_node_version(peer, version);
     }
 

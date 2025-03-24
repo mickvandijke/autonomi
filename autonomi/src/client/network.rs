@@ -7,7 +7,7 @@
 // permissions and limitations relating to use of the SAFE Network Software.
 
 use crate::Client;
-use ant_networking::{Addresses, NetworkError};
+use ant_networking::{Addresses, NetworkError, PackageVersion};
 use ant_protocol::NetworkAddress;
 use libp2p::PeerId;
 
@@ -21,5 +21,15 @@ impl Client {
         self.network
             .client_get_all_close_peers_in_range_or_close_group(&network_address.into())
             .await
+    }
+
+    /// Request the node version of a peer on the network.
+    /// Requires the node address(es) to be passed if the node is not in the local routing table.
+    pub async fn get_node_version(
+        &self,
+        peer_id: PeerId,
+        addresses: Addresses,
+    ) -> Result<PackageVersion, String> {
+        self.network.get_node_version(peer_id, addresses).await
     }
 }

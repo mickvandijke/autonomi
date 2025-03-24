@@ -88,6 +88,9 @@ pub use xor_name::XorName;
 // Re-exports of the bls types
 pub use bls::{PublicKey, SecretKey, Signature};
 
+// Re-exports of networking related types
+pub use ant_networking::PackageVersion;
+
 #[doc(no_inline)] // Place this under 'Re-exports' in the docs.
 pub use bytes::Bytes;
 #[doc(no_inline)] // Place this under 'Re-exports' in the docs.

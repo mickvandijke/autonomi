@@ -30,6 +30,7 @@ mod relay_manager;
 mod replication_fetcher;
 pub mod time;
 mod transport;
+mod version;
 
 use cmd::LocalSwarmCmd;
 use xor_name::XorName;
@@ -44,6 +45,7 @@ pub use self::{
     graph::get_graph_entry_from_record,
     network_builder::{NetworkBuilder, MAX_PACKET_SIZE},
     record_store::NodeRecordStore,
+    version::PackageVersion,
 };
 #[cfg(feature = "open-metrics")]
 pub use metrics::service::MetricsRegistries;
@@ -736,6 +738,30 @@ impl Network {
             return Ok(Some(record));
         }
         Ok(None)
+    }
+
+    /// Request the node version of a peer on the network.
+    /// Requires the node address(es) to be passed if the node is not in the local routing table.
+    pub async fn get_node_version(
+        &self,
+        peer_id: PeerId,
+        addresses: Addresses,
+    ) -> Result<PackageVersion, String> {
+        let request = Request::Query(Query::GetVersion(NetworkAddress::from(peer_id)));
+        match self.send_request(request, peer_id, addresses).await {
+            Ok((Response::Query(QueryResponse::GetVersion { version, .. }), _conn_info)) => {
+                info!("Fetched peer {peer_id:?} version as {version:?}");
+                PackageVersion::try_from(version)
+            }
+            Ok(other) => {
+                info!("Not a version fetched from peer {peer_id:?}, {other:?}");
+                Err("none".to_string())
+            }
+            Err(err) => {
+                info!("Failed to fetch version from peer {peer_id:?} with error {err:?}");
+                Err("old".to_string())
+            }
+        }
     }
 
     /// Get the quoting metrics for storing the next record from the network
