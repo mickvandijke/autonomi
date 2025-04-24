@@ -7,6 +7,7 @@
 // permissions and limitations relating to use of the SAFE Network Software.
 
 use crate::error::{Error, Result};
+use ant_protocol::version::MAIN_NETWORK_ID;
 use std::{
     path::{Path, PathBuf},
     time::Duration,
@@ -30,7 +31,9 @@ const MAX_BOOTSTRAP_CACHE_SAVE_INTERVAL: Duration = Duration::from_secs(24 * 60 
 /// Configuration for the bootstrap cache
 #[derive(Clone, Debug)]
 pub struct BootstrapCacheConfig {
-    /// The duration since last)seen before removing the address of a Peer.
+    /// The unique Network ID. Every network needs its own cache.
+    pub network_id: u8,
+    /// The duration since last seen before removing the address of a Peer.
     pub addr_expiry_duration: Duration,
     /// Maximum number of peers to keep in the cache
     pub max_peers: usize,
@@ -54,10 +57,12 @@ impl BootstrapCacheConfig {
     /// When `local` is set to true, a different cache file name is used.
     /// I.e. the file name will include `_local_` in the name.
     pub fn default_config(local: bool) -> Result<Self> {
+        let network_id = MAIN_NETWORK_ID;
+
         let cache_file_path = if local {
-            default_cache_path_local()?
+            default_cache_path_local(network_id)?
         } else {
-            default_cache_path()?
+            default_cache_path(network_id)?
         };
         Ok(Self {
             cache_file_path,
@@ -68,6 +73,7 @@ impl BootstrapCacheConfig {
     /// Creates a new BootstrapConfig with empty settings
     pub fn empty() -> Self {
         Self {
+            network_id: 0, // Network ID 0 for testing
             addr_expiry_duration: ADDR_EXPIRY_DURATION,
             max_peers: MAX_PEERS,
             max_addrs_per_peer: MAX_ADDRS_PER_PEER,
@@ -111,13 +117,14 @@ impl BootstrapCacheConfig {
 }
 
 /// Returns the default path for the bootstrap cache file
-fn default_cache_path() -> Result<PathBuf> {
-    Ok(default_cache_dir()?.join(cache_file_name()))
+fn default_cache_path(network_id: u8) -> Result<PathBuf> {
+    Ok(default_cache_dir()?.join(cache_file_name(network_id)))
 }
+
 /// Returns the default path for the bootstrap cache file that is used for
 /// local networks
-fn default_cache_path_local() -> Result<PathBuf> {
-    Ok(default_cache_dir()?.join(cache_file_name_local()))
+fn default_cache_path_local(network_id: u8) -> Result<PathBuf> {
+    Ok(default_cache_dir()?.join(cache_file_name_local(network_id)))
 }
 
 /// Returns the default dir that should contain the bootstrap cache file
@@ -133,14 +140,17 @@ fn default_cache_dir() -> Result<PathBuf> {
 }
 
 /// Returns the name of the cache file
-pub fn cache_file_name() -> String {
-    format!("bootstrap_cache_{}.json", crate::get_network_version())
+pub fn cache_file_name(network_id: u8) -> String {
+    format!(
+        "bootstrap_cache_{}.json",
+        crate::get_network_version(network_id)
+    )
 }
 
 /// Returns the name of the cache file for local networks
-pub fn cache_file_name_local() -> String {
+pub fn cache_file_name_local(network_id: u8) -> String {
     format!(
         "bootstrap_cache_local_{}.json",
-        crate::get_network_version()
+        crate::get_network_version(network_id)
     )
 }

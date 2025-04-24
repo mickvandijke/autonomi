@@ -7,6 +7,7 @@
 // permissions and limitations relating to use of the SAFE Network Software.
 
 use crate::{cache_store::CacheData, craft_valid_multiaddr_from_str, BootstrapAddr, Error, Result};
+use ant_protocol::version::MAIN_NETWORK_ID;
 use futures::stream::{self, StreamExt};
 use libp2p::Multiaddr;
 use reqwest::Client;
@@ -31,6 +32,8 @@ const MAX_RETRIES_ON_FETCH_FAILURE: usize = 3;
 
 /// Discovers initial peers from a list of endpoints
 pub struct ContactsFetcher {
+    /// Network ID.
+    network_id: u8,
     /// The number of addrs to fetch
     max_addrs: usize,
     /// The list of endpoints
@@ -42,39 +45,18 @@ pub struct ContactsFetcher {
 }
 
 impl ContactsFetcher {
-    /// Create a new struct with the default endpoint
-    pub fn new() -> Result<Self> {
-        Self::with_endpoints(vec![])
-    }
-
-    /// Create a new struct with the provided endpoints
-    pub fn with_endpoints(endpoints: Vec<Url>) -> Result<Self> {
-        let request_client = Client::builder()
-            .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS))
-            .build()?;
-
-        Ok(Self {
+    pub fn builder() -> ContactsFetcherBuilder {
+        ContactsFetcherBuilder {
+            network_id: MAIN_NETWORK_ID,
             max_addrs: usize::MAX,
-            endpoints,
-            request_client,
+            endpoints: vec![],
             ignore_peer_id: false,
-        })
+        }
     }
 
     /// Set the number of addrs to fetch
     pub fn set_max_addrs(&mut self, max_addrs: usize) {
         self.max_addrs = max_addrs;
-    }
-
-    /// Create a new struct with the mainnet endpoints
-    pub fn with_mainnet_endpoints() -> Result<Self> {
-        let mut fetcher = Self::new()?;
-        let mainnet_contact = MAINNET_CONTACTS
-            .iter()
-            .map(|url| url.parse().expect("Failed to parse static URL"))
-            .collect();
-        fetcher.endpoints = mainnet_contact;
-        Ok(fetcher)
     }
 
     pub fn insert_endpoint(&mut self, endpoint: Url) {
@@ -111,7 +93,7 @@ impl ContactsFetcher {
                     endpoint
                 );
                 (
-                    Self::fetch_from_endpoint(
+                    self.fetch_from_endpoint(
                         self.request_client.clone(),
                         &endpoint,
                         self.ignore_peer_id,
@@ -160,6 +142,7 @@ impl ContactsFetcher {
 
     /// Fetch the list of multiaddrs from a single endpoint
     async fn fetch_from_endpoint(
+        &self,
         request_client: Client,
         endpoint: &Url,
         ignore_peer_id: bool,
@@ -175,7 +158,7 @@ impl ContactsFetcher {
                     if response.status().is_success() {
                         let text = response.text().await?;
 
-                        match Self::try_parse_response(&text, ignore_peer_id) {
+                        match self.try_parse_response(&text, ignore_peer_id) {
                             Ok(addrs) => break addrs,
                             Err(err) => {
                                 warn!("Failed to parse response with err: {err:?}");
@@ -220,14 +203,15 @@ impl ContactsFetcher {
     }
 
     /// Try to parse a response from an endpoint
-    fn try_parse_response(response: &str, ignore_peer_id: bool) -> Result<Vec<Multiaddr>> {
+    fn try_parse_response(&self, response: &str, ignore_peer_id: bool) -> Result<Vec<Multiaddr>> {
         match serde_json::from_str::<CacheData>(response) {
             Ok(json_endpoints) => {
                 info!(
                     "Successfully parsed JSON response with {} peers",
                     json_endpoints.peers.len()
                 );
-                let our_network_version = crate::get_network_version();
+
+                let our_network_version = crate::get_network_version(self.network_id);
 
                 if json_endpoints.network_version != our_network_version {
                     warn!(
@@ -268,6 +252,57 @@ impl ContactsFetcher {
     }
 }
 
+pub struct ContactsFetcherBuilder {
+    network_id: u8,
+    max_addrs: usize,
+    endpoints: Vec<Url>,
+    ignore_peer_id: bool,
+}
+
+impl ContactsFetcherBuilder {
+    pub fn network_id(mut self, network_id: u8) -> Self {
+        self.network_id = network_id;
+        self
+    }
+
+    pub fn max_addrs(mut self, max_addrs: usize) -> Self {
+        self.max_addrs = max_addrs;
+        self
+    }
+
+    pub fn endpoints(mut self, endpoints: Vec<Url>) -> Self {
+        self.endpoints = endpoints;
+        self
+    }
+
+    pub fn ignore_peer_id(mut self, ignore: bool) -> Self {
+        self.ignore_peer_id = ignore;
+        self
+    }
+
+    pub fn with_mainnet_endpoints(mut self) -> Self {
+        self.endpoints = MAINNET_CONTACTS
+            .iter()
+            .map(|url| url.parse().expect("Invalid mainnet endpoint"))
+            .collect();
+        self
+    }
+
+    pub fn build(self) -> Result<ContactsFetcher> {
+        let request_client = Client::builder()
+            .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS))
+            .build()?;
+
+        Ok(ContactsFetcher {
+            network_id: self.network_id,
+            max_addrs: self.max_addrs,
+            endpoints: self.endpoints,
+            request_client,
+            ignore_peer_id: self.ignore_peer_id,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,8 +325,11 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let mut fetcher = ContactsFetcher::new().unwrap();
-        fetcher.endpoints = vec![mock_server.uri().parse().unwrap()];
+        let fetcher = ContactsFetcher::builder()
+            .network_id(0)
+            .endpoints(vec![mock_server.uri().parse().unwrap()])
+            .build()
+            .unwrap();
 
         let addrs = fetcher.fetch_bootstrap_addresses().await.unwrap();
         assert_eq!(addrs.len(), 2);
@@ -329,11 +367,14 @@ mod tests {
             .mount(&mock_server2)
             .await;
 
-        let mut fetcher = ContactsFetcher::new().unwrap();
-        fetcher.endpoints = vec![
-            mock_server1.uri().parse().unwrap(),
-            mock_server2.uri().parse().unwrap(),
-        ];
+        let fetcher = ContactsFetcher::builder()
+            .network_id(0)
+            .endpoints(vec![
+                mock_server1.uri().parse().unwrap(),
+                mock_server2.uri().parse().unwrap(),
+            ])
+            .build()
+            .unwrap();
 
         let addrs = fetcher.fetch_bootstrap_addresses().await.unwrap();
         assert_eq!(addrs.len(), 1);
@@ -359,8 +400,11 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let mut fetcher = ContactsFetcher::new().unwrap();
-        fetcher.endpoints = vec![mock_server.uri().parse().unwrap()];
+        let fetcher = ContactsFetcher::builder()
+            .network_id(0)
+            .endpoints(vec![mock_server.uri().parse().unwrap()])
+            .build()
+            .unwrap();
 
         let addrs = fetcher.fetch_bootstrap_addresses().await.unwrap();
         let valid_addr: Multiaddr =
@@ -382,8 +426,11 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let mut fetcher = ContactsFetcher::new().unwrap();
-        fetcher.endpoints = vec![mock_server.uri().parse().unwrap()];
+        let fetcher = ContactsFetcher::builder()
+            .network_id(0)
+            .endpoints(vec![mock_server.uri().parse().unwrap()])
+            .build()
+            .unwrap();
 
         let addrs = fetcher.fetch_bootstrap_addresses().await.unwrap();
         assert_eq!(addrs.len(), 1);
@@ -398,7 +445,11 @@ mod tests {
     #[tokio::test]
     async fn test_custom_endpoints() {
         let endpoints = vec!["http://example.com".parse().unwrap()];
-        let fetcher = ContactsFetcher::with_endpoints(endpoints.clone()).unwrap();
+        let fetcher = ContactsFetcher::builder()
+            .network_id(0)
+            .endpoints(endpoints.clone())
+            .build()
+            .unwrap();
         assert_eq!(fetcher.endpoints, endpoints);
     }
 }

@@ -21,6 +21,7 @@ use ant_logging::metrics::init_metrics;
 use ant_logging::{Level, LogFormat, LogOutputDest, ReloadHandle};
 use ant_node::utils::get_root_dir_and_keypair;
 use ant_node::{Marker, NodeBuilder, NodeEvent, NodeEventsReceiver};
+use ant_protocol::version::MAIN_NETWORK_ID;
 use ant_protocol::{
     node::get_antnode_root_dir,
     node_rpc::{NodeCtrl, StopResult},
@@ -218,13 +219,9 @@ fn main() -> Result<()> {
     color_eyre::install()?;
     let opt = Opt::parse();
 
-    if let Some(network_id) = opt.network_id {
-        version::set_network_id(network_id);
-    }
+    let network_id = opt.network_id.unwrap_or(MAIN_NETWORK_ID);
+    let identify_protocol_str = version::identify_protocol_str(network_id);
 
-    let identify_protocol_str = version::IDENTIFY_PROTOCOL_STR
-        .read()
-        .expect("Failed to obtain read lock for IDENTIFY_PROTOCOL_STR");
     if opt.version {
         println!(
             "{}",

@@ -21,6 +21,7 @@ use url::Url;
 /// The name of the environment variable that can be used to pass peers to the node.
 pub const ANT_PEERS_ENV: &str = "ANT_PEERS";
 
+// todo: add network id field
 /// Configurations to fetch the initial peers which is used to bootstrap the network.
 /// This could optionally also be used as a command line argument struct.
 #[derive(Args, Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -82,11 +83,12 @@ impl InitialPeersConfig {
     /// the first in the list.
     pub async fn get_addrs(
         &self,
+        network_id: u8,
         config: Option<BootstrapCacheConfig>,
         count: Option<usize>,
     ) -> Result<Vec<Multiaddr>> {
         Ok(self
-            .get_bootstrap_addr(config, count)
+            .get_bootstrap_addr(network_id, config, count)
             .await?
             .into_iter()
             .map(|addr| addr.addr)
@@ -97,6 +99,7 @@ impl InitialPeersConfig {
     /// the first in the list.
     pub async fn get_bootstrap_addr(
         &self,
+        network_id: u8,
         config: Option<BootstrapCacheConfig>,
         count: Option<usize>,
     ) -> Result<Vec<BootstrapAddr>> {
@@ -142,7 +145,7 @@ impl InitialPeersConfig {
                 BootstrapCacheConfig::default_config(self.local).ok()
             };
             if let Some(mut cfg) = cfg {
-                if let Some(file_path) = self.get_bootstrap_cache_path()? {
+                if let Some(file_path) = self.get_bootstrap_cache_path(network_id)? {
                     cfg.cache_file_path = file_path;
                 }
                 info!("Loading bootstrap addresses from cache");
@@ -180,7 +183,10 @@ impl InitialPeersConfig {
                 .iter()
                 .map(|url| url.parse::<Url>().map_err(|_| Error::FailedToParseUrl))
                 .collect::<Result<Vec<Url>>>()?;
-            let mut contacts_fetcher = ContactsFetcher::with_endpoints(addrs)?;
+            let mut contacts_fetcher = ContactsFetcher::builder()
+                .network_id(network_id)
+                .endpoints(addrs)
+                .build()?;
             if let Some(count) = count {
                 contacts_fetcher.set_max_addrs(count);
             }
@@ -198,7 +204,9 @@ impl InitialPeersConfig {
         }
 
         if !self.local && !self.disable_mainnet_contacts {
-            let mut contacts_fetcher = ContactsFetcher::with_mainnet_endpoints()?;
+            let mut contacts_fetcher = ContactsFetcher::builder()
+                .with_mainnet_endpoints()
+                .build()?;
             if let Some(count) = count {
                 contacts_fetcher.set_max_addrs(count);
             }
@@ -242,7 +250,7 @@ impl InitialPeersConfig {
     }
 
     /// Get the path to the bootstrap cache JSON file if `Self::bootstrap_cache_dir` is set
-    pub fn get_bootstrap_cache_path(&self) -> Result<Option<PathBuf>> {
+    pub fn get_bootstrap_cache_path(&self, network_id: u8) -> Result<Option<PathBuf>> {
         if let Some(dir) = &self.bootstrap_cache_dir {
             if dir.is_file() {
                 return Err(Error::InvalidBootstrapCacheDir);
@@ -252,7 +260,7 @@ impl InitialPeersConfig {
                 std::fs::create_dir_all(dir)?;
             }
 
-            let path = dir.join(cache_file_name());
+            let path = dir.join(cache_file_name(network_id));
             Ok(Some(path))
         } else {
             Ok(None)

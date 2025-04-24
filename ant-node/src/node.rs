@@ -82,6 +82,7 @@ const NETWORK_DENSITY_SAMPLING_INTERVAL_MAX_S: u64 = 200;
 
 /// Helper to build and run a Node
 pub struct NodeBuilder {
+    network_id: u8,
     bootstrap_cache: Option<BootstrapCacheStore>,
     initial_peers: Vec<Multiaddr>,
     identity_keypair: Keypair,
@@ -102,6 +103,7 @@ impl NodeBuilder {
     /// Instantiate the builder. The initial peers can either be supplied via the `initial_peers` method
     /// or fetched from the bootstrap cache set using `bootstrap_cache` method.
     pub fn new(
+        network_id: u8,
         identity_keypair: Keypair,
         initial_peers: Vec<Multiaddr>,
         evm_address: RewardsAddress,
@@ -110,6 +112,7 @@ impl NodeBuilder {
         root_dir: PathBuf,
     ) -> Self {
         Self {
+            network_id,
             bootstrap_cache: None,
             initial_peers,
             identity_keypair,

@@ -62,6 +62,7 @@ pub const CONNECT_TIMEOUT_SECS: u64 = 10;
 const CLIENT_EVENT_CHANNEL_SIZE: usize = 100;
 
 // Amount of peers to confirm into our routing table before we consider the client ready.
+use ant_protocol::version::MAIN_NETWORK_ID;
 pub use ant_protocol::CLOSE_GROUP_SIZE;
 
 /// Represents a client for the Autonomi network.
@@ -213,14 +214,16 @@ impl Client {
     /// # }
     /// ```
     pub async fn init_with_config(config: ClientConfig) -> Result<Self, ConnectError> {
-        let initial_peers = match config.init_peers_config.get_addrs(None, None).await {
+        let network_id = config.network_id.unwrap_or(MAIN_NETWORK_ID);
+
+        let initial_peers = match config
+            .init_peers_config
+            .get_addrs(network_id, None, None)
+            .await
+        {
             Ok(peers) => peers,
             Err(e) => return Err(e.into()),
         };
-
-        if let Some(network_id) = config.network_id {
-            ant_protocol::version::set_network_id(network_id);
-        }
 
         let (shutdown_tx, network, event_receiver) =
             build_client_and_run_swarm(&config.init_peers_config, initial_peers);

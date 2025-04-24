@@ -8,7 +8,7 @@
 
 use crate::relay_manager::is_a_relayed_peer;
 use crate::{multiaddr_is_global, multiaddr_strip_p2p, NetworkEvent, SwarmDriver};
-use ant_protocol::version::IDENTIFY_PROTOCOL_STR;
+use ant_protocol::version::identify_protocol_str;
 use libp2p::identify::Info;
 use libp2p::kad::K_VALUE;
 use libp2p::multiaddr::Protocol;
@@ -44,7 +44,7 @@ impl SwarmDriver {
     ) {
         debug!(conn_id=%connection_id, %peer_id, ?info, "identify: received info");
 
-        let our_identify_protocol = IDENTIFY_PROTOCOL_STR.read().expect("IDENTIFY_PROTOCOL_STR has been locked to write. A call to set_network_id performed. This should not happen.").to_string();
+        let our_identify_protocol = identify_protocol_str(self.network_id);
 
         if info.protocol_version != our_identify_protocol {
             warn!(?info.protocol_version, "identify: {peer_id:?} does not have the same protocol. Our IDENTIFY_PROTOCOL_STR: {our_identify_protocol:?}");

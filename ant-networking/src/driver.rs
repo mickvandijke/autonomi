@@ -112,6 +112,7 @@ pub(super) struct NodeBehaviour {
 pub struct SwarmDriver {
     pub(crate) swarm: Swarm<NodeBehaviour>,
     pub(crate) self_peer_id: PeerId,
+    pub(crate) network_id: u8,
     /// When true, we don't filter our local addresses
     pub(crate) local: bool,
     pub(crate) is_client: bool,

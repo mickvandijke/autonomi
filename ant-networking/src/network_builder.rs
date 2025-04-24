@@ -27,13 +27,10 @@ use crate::{
     metrics::service::run_metrics_server, metrics::NetworkMetricsRecorder, MetricsRegistries,
 };
 use ant_bootstrap::BootstrapCacheStore;
-use ant_protocol::{
-    version::{
-        get_network_id, IDENTIFY_CLIENT_VERSION_STR, IDENTIFY_NODE_VERSION_STR,
-        IDENTIFY_PROTOCOL_STR, REQ_RESPONSE_VERSION_STR,
-    },
-    NetworkAddress, PrettyPrintKBucketKey,
+use ant_protocol::version::{
+    identify_client_version_str, identify_node_version_str, MAIN_NETWORK_ID,
 };
+use ant_protocol::{NetworkAddress, PrettyPrintKBucketKey};
 use futures::future::Either;
 use libp2p::Transport as _;
 use libp2p::{core::muxing::StreamMuxerBox, relay};
@@ -92,6 +89,7 @@ const PERIODIC_KAD_BOOTSTRAP_INTERVAL_MAX_S: u64 = 21600;
 
 #[derive(Debug)]
 pub struct NetworkBuilder {
+    network_id: u8,
     bootstrap_cache: Option<BootstrapCacheStore>,
     concurrency_limit: Option<usize>,
     initial_contacts: Vec<Multiaddr>,
@@ -110,6 +108,7 @@ pub struct NetworkBuilder {
 impl NetworkBuilder {
     pub fn new(keypair: Keypair, local: bool, initial_contacts: Vec<Multiaddr>) -> Self {
         Self {
+            network_id: MAIN_NETWORK_ID,
             bootstrap_cache: None,
             concurrency_limit: None,
             initial_contacts,
@@ -124,6 +123,10 @@ impl NetworkBuilder {
             request_timeout: None,
             upnp: false,
         }
+    }
+
+    pub fn network_id(&mut self, network_id: u8) {
+        self.network_id = network_id;
     }
 
     pub fn bootstrap_cache(&mut self, bootstrap_cache: BootstrapCacheStore) {
@@ -219,7 +222,7 @@ impl NetworkBuilder {
             check_and_wipe_storage_dir_if_necessary(
                 root_dir.clone(),
                 storage_dir_path.clone(),
-                get_network_id(),
+                self.network_id.to_string(),
             )?;
 
             // Configures the disk_store to store records under the provided path and increase the max record size
@@ -298,10 +301,7 @@ impl NetworkBuilder {
         req_res_protocol: ProtocolSupport,
         upnp: bool,
     ) -> (Network, mpsc::Receiver<NetworkEvent>, SwarmDriver) {
-        let identify_protocol_str = IDENTIFY_PROTOCOL_STR
-            .read()
-            .expect("Failed to obtain read lock for IDENTIFY_PROTOCOL_STR")
-            .clone();
+        let identify_protocol_str = ant_protocol::version::identify_protocol_str(self.network_id);
 
         let peer_id = PeerId::from(self.keypair.public());
         // vdash metric (if modified please notify at https://github.com/happybeing/vdash/issues):
@@ -379,10 +379,9 @@ impl NetworkBuilder {
         let request_response = {
             let cfg = RequestResponseConfig::default()
                 .with_request_timeout(self.request_timeout.unwrap_or(REQUEST_TIMEOUT_DEFAULT_S));
-            let req_res_version_str = REQ_RESPONSE_VERSION_STR
-                .read()
-                .expect("Failed to obtain read lock for REQ_RESPONSE_VERSION_STR")
-                .clone();
+
+            let req_res_version_str =
+                ant_protocol::version::req_response_version_str(self.network_id);
 
             info!("Building request response with {req_res_version_str:?}",);
             request_response::cbor::Behaviour::new(
@@ -431,16 +430,11 @@ impl NetworkBuilder {
         };
 
         let agent_version = if is_client {
-            IDENTIFY_CLIENT_VERSION_STR
-                .read()
-                .expect("Failed to obtain read lock for IDENTIFY_CLIENT_VERSION_STR")
-                .clone()
+            identify_client_version_str(self.network_id)
         } else {
-            IDENTIFY_NODE_VERSION_STR
-                .read()
-                .expect("Failed to obtain read lock for IDENTIFY_NODE_VERSION_STR")
-                .clone()
+            identify_node_version_str(self.network_id)
         };
+
         // Identify Behaviour
         info!("Building Identify with identify_protocol_str: {identify_protocol_str:?} and identify_protocol_str: {identify_protocol_str:?}");
         let identify = {
@@ -521,6 +515,7 @@ impl NetworkBuilder {
         let swarm_driver = SwarmDriver {
             swarm,
             self_peer_id: peer_id,
+            network_id: self.network_id,
             local: self.local,
             is_client,
             is_behind_home_network: self.is_behind_home_network,

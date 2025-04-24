@@ -10,6 +10,7 @@ use crate::{
     craft_valid_multiaddr, multiaddr_get_peer_id, BootstrapAddr, BootstrapAddresses,
     BootstrapCacheConfig, Error, InitialPeersConfig, Result,
 };
+use ant_protocol::version::MAIN_NETWORK_ID;
 use atomic_write_file::AtomicWriteFile;
 use libp2p::{multiaddr::Protocol, Multiaddr, PeerId};
 use serde::{Deserialize, Serialize};
@@ -131,7 +132,7 @@ impl Default for CacheData {
         Self {
             peers: std::collections::HashMap::new(),
             last_updated: SystemTime::now(),
-            network_version: crate::get_network_version(),
+            network_version: crate::get_network_version(MAIN_NETWORK_ID),
         }
     }
 }
@@ -186,7 +187,9 @@ impl BootstrapCacheStore {
         } else {
             BootstrapCacheConfig::default_config(init_peers_config.local)?
         };
-        if let Some(bootstrap_cache_path) = init_peers_config.get_bootstrap_cache_path()? {
+        if let Some(bootstrap_cache_path) =
+            init_peers_config.get_bootstrap_cache_path(config.network_id)?
+        {
             config.cache_file_path = bootstrap_cache_path;
         }
 
