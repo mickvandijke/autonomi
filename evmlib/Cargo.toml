@@ -6,7 +6,7 @@ homepage = "https://maidsafe.net"
 license = "GPL-3.0"
 name = "evmlib"
 repository = "https://github.com/maidsafe/autonomi"
-version = "0.2.1"
+version = "0.3.0"
 
 [features]
 external-signer = []
@@ -20,7 +20,7 @@ serde = "1"
 serde_with = { version = "3.11.0", features = ["macros"] }
 thiserror = "1.0"
 tracing = { version = "~0.1.26" }
-tokio = "1.38.0"
+tokio = "1.43.1"
 rand = "0.8.5"
 
 [dev-dependencies]

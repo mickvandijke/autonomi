@@ -179,6 +179,14 @@ pub enum LocalSwarmCmd {
         peer: PeerId,
         version: String,
     },
+    /// Get responsible distance range.
+    GetNetworkDensity {
+        sender: oneshot::Sender<Option<Distance>>,
+    },
+    /// Remove peer from the routing table
+    RemovePeer {
+        peer: PeerId,
+    },
 }
 
 /// Commands to send to the Swarm
@@ -360,6 +368,12 @@ impl Debug for LocalSwarmCmd {
             }
             LocalSwarmCmd::NotifyPeerVersion { peer, version } => {
                 write!(f, "LocalSwarmCmd::NotifyPeerVersion({peer:?}, {version:?})")
+            }
+            LocalSwarmCmd::GetNetworkDensity { .. } => {
+                write!(f, "LocalSwarmCmd::GetNetworkDensity")
+            }
+            LocalSwarmCmd::RemovePeer { peer } => {
+                write!(f, "LocalSwarmCmd::RemovePeer({peer:?})")
             }
         }
     }
@@ -1013,6 +1027,23 @@ impl SwarmDriver {
                 cmd_string = "NotifyPeerVersion";
                 self.record_node_version(peer, version);
             }
+            LocalSwarmCmd::GetNetworkDensity { sender } => {
+                cmd_string = "GetNetworkDensity";
+                let density = self
+                    .swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .store_mut()
+                    .get_farthest_replication_distance()
+                    .unwrap_or_default();
+                let _ = sender.send(density);
+            }
+            LocalSwarmCmd::RemovePeer { peer } => {
+                cmd_string = "RemovePeer";
+                if let Some(dead_peer) = self.swarm.behaviour_mut().kademlia.remove_peer(&peer) {
+                    self.update_on_peer_removal(*dead_peer.node.key.preimage());
+                }
+            }
         }
 
         self.log_handling(cmd_string.to_string(), start.elapsed());
@@ -1022,25 +1053,6 @@ impl SwarmDriver {
 
     fn record_node_version(&mut self, peer_id: PeerId, version: String) {
         let _ = self.peers_version.insert(peer_id, version);
-
-        // Collect all peers_in_non_full_buckets
-        let mut peers_in_non_full_buckets = vec![];
-        for kbucket in self.swarm.behaviour_mut().kademlia.kbuckets() {
-            let num_entires = kbucket.num_entries();
-            if num_entires >= K_VALUE.get() {
-                continue;
-            } else {
-                let peers_in_kbucket = kbucket
-                    .iter()
-                    .map(|peer_entry| peer_entry.node.key.into_preimage())
-                    .collect::<Vec<PeerId>>();
-                peers_in_non_full_buckets.extend(peers_in_kbucket);
-            }
-        }
-
-        // Ensure all existing node_version records are for those peers_in_non_full_buckets
-        self.peers_version
-            .retain(|peer_id, _version| peers_in_non_full_buckets.contains(peer_id));
     }
 
     pub(crate) fn record_node_issue(&mut self, peer_id: PeerId, issue: NodeIssue) {

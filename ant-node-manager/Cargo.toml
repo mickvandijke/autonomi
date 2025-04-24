@@ -7,7 +7,7 @@ license = "GPL-3.0"
 name = "ant-node-manager"
 readme = "README.md"
 repository = "https://github.com/maidsafe/autonomi"
-version = "0.12.1"
+version = "0.12.3"
 
 [[bin]]
 name = "antctl"
@@ -29,13 +29,13 @@ tcp = []
 websockets = []
 
 [dependencies]
-ant-bootstrap = { path = "../ant-bootstrap", version = "0.2.0" }
-ant-build-info = { path = "../ant-build-info", version = "0.1.26" }
-ant-evm = { path = "../ant-evm", version = "0.1.11" }
-ant-logging = { path = "../ant-logging", version = "0.2.48" }
-ant-protocol = { path = "../ant-protocol", version = "1.0.2" }
+ant-bootstrap = { path = "../ant-bootstrap", version = "0.2.1" }
+ant-build-info = { path = "../ant-build-info", version = "0.1.27" }
+ant-evm = { path = "../ant-evm", version = "0.1.13" }
+ant-logging = { path = "../ant-logging", version = "0.2.49" }
+ant-protocol = { path = "../ant-protocol", version = "1.0.4" }
 ant-releases = { version = "0.4.0" }
-ant-service-management = { path = "../ant-service-management", version = "0.4.10" }
+ant-service-management = { path = "../ant-service-management", version = "0.4.12" }
 chrono = "~0.4.19"
 clap = { version = "4.4.6", features = ["derive", "env"] }
 colored = "2.0.4"
@@ -52,7 +52,7 @@ serde_json = "1.0"
 service-manager = "0.8.0"
 sysinfo = "0.30.12"
 thiserror = "1.0.23"
-tokio = { version = "1.26", features = ["full"] }
+tokio = { version = "1.43", features = ["full"] }
 tracing = { version = "~0.1.26" }
 tonic = { version = "0.6.2" }
 uuid = { version = "1.5.0", features = ["v4"] }

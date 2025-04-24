@@ -130,7 +130,7 @@ impl Pointer {
     }
 
     pub fn xorname(&self) -> XorName {
-        self.target.xorname()
+        self.address().xorname()
     }
 
     /// Get the counter of the pointer, the higher the counter, the more recent the pointer is

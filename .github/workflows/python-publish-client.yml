@@ -125,6 +125,9 @@ jobs:
         with:
           target: ${{ matrix.target }}
           manylinux: musllinux_1_2
+          before-script-linux: |
+            rustup default stable
+            rustup component add rustfmt
           args: --release --out dist -i python${{ matrix.python-version }}
           sccache: 'true'
           working-directory: ./autonomi

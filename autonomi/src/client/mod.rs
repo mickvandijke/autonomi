@@ -163,6 +163,7 @@ impl Client {
             },
             evm_network: EvmNetwork::new(true).unwrap_or_default(),
             strategy: Default::default(),
+            network_id: None,
         })
         .await
     }
@@ -192,6 +193,7 @@ impl Client {
             },
             evm_network: EvmNetwork::new(local).unwrap_or_default(),
             strategy: Default::default(),
+            network_id: None,
         })
         .await
     }
@@ -215,6 +217,10 @@ impl Client {
             Ok(peers) => peers,
             Err(e) => return Err(e.into()),
         };
+
+        if let Some(network_id) = config.network_id {
+            ant_protocol::version::set_network_id(network_id);
+        }
 
         let (shutdown_tx, network, event_receiver) =
             build_client_and_run_swarm(&config.init_peers_config, initial_peers);

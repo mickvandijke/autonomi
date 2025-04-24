@@ -8,31 +8,31 @@
 
 mod common;
 
-use ant_networking::{sleep, sort_peers_by_key};
-use ant_node::{
-    spawn::{
-        network_spawner::{NetworkSpawner, RunningNetwork},
-        node_spawner::NodeSpawner,
-    },
-    RunningNode,
+use ant_logging::LogBuilder;
+use ant_networking::sort_peers_by_key;
+use ant_protocol::{
+    antnode_proto::{NodeInfoRequest, RecordAddressesRequest},
+    NetworkAddress, PrettyPrintRecordKey, CLOSE_GROUP_SIZE,
 };
-use ant_protocol::{NetworkAddress, PrettyPrintRecordKey, CLOSE_GROUP_SIZE};
-use autonomi::{Client, ClientConfig, InitialPeersConfig};
+use autonomi::Client;
 use bytes::Bytes;
-use common::get_all_peer_ids;
-use evmlib::wallet::Wallet;
+use common::{
+    client::{get_all_rpc_addresses, get_client_and_funded_wallet},
+    get_all_peer_ids, get_antnode_rpc_client, NodeRestart,
+};
 use eyre::{eyre, Result};
 use itertools::Itertools;
 use libp2p::{
     kad::{KBucketKey, RecordKey},
-    Multiaddr, PeerId,
+    PeerId,
 };
 use rand::{rngs::OsRng, Rng};
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::SocketAddr,
     time::{Duration, Instant},
 };
+use tonic::Request;
 use tracing::{debug, error, info};
 
 const CHUNK_SIZE: usize = 1024;
@@ -65,6 +65,9 @@ type RecordHolders = HashMap<RecordKey, HashSet<NodeIndex>>;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn verify_data_location() -> Result<()> {
+    let _log_appender_guard =
+        LogBuilder::init_multi_threaded_tokio_test("verify_data_location", false);
+
     let churn_count = if let Ok(str) = std::env::var("CHURN_COUNT") {
         str.parse::<u8>()?
     } else {
@@ -83,102 +86,62 @@ async fn verify_data_location() -> Result<()> {
         "Performing data location verification with a churn count of {churn_count} and n_chunks {chunk_count}\nIt will take approx {:?}",
         VERIFICATION_DELAY*churn_count as u32
     );
+    let node_rpc_address = get_all_rpc_addresses(true)?;
+    let mut all_peers = get_all_peer_ids(&node_rpc_address).await?;
 
-    // initiate a testnet, and spawn a network
-    let evm_testnet = evmlib::testnet::Testnet::new().await;
-    let evm_network = evm_testnet.to_network();
-    let evm_sk = evm_testnet.default_wallet_private_key();
-    let funded_wallet =
-        Wallet::new_from_private_key(evm_network.clone(), &evm_sk).expect("Invalid private key");
-    let mut network = NetworkSpawner::new()
-        .with_evm_network(evm_network.clone())
-        .with_rewards_address(funded_wallet.address())
-        .with_local(true)
-        .with_size(20)
-        .spawn()
-        .await
-        .unwrap();
-    let peer = network.bootstrap_peer().await;
-    let config = ClientConfig {
-        init_peers_config: InitialPeersConfig {
-            first: false,
-            local: true,
-            addrs: vec![peer],
-            bootstrap_cache_dir: None,
-            disable_mainnet_contacts: true,
-            ignore_cache: false,
-            network_contacts_url: vec![],
-        },
-        evm_network: evm_network.clone(),
-        strategy: autonomi::ClientOperatingStrategy::default(),
-    };
-    let client = Client::init_with_config(config).await.unwrap();
+    let (client, wallet) = get_client_and_funded_wallet().await;
 
-    // let node_rpc_address = get_all_rpc_addresses(true)?;
-    let mut all_peers = get_all_peer_ids(&network)?;
+    store_chunks(&client, chunk_count, &wallet).await?;
 
-    store_chunks(&client, chunk_count, &funded_wallet).await?;
-    println!("verifying data location initially before churning");
     // Verify data location initially
-    verify_location(&all_peers, &network).await?;
-    println!("Initial verification done");
+    verify_location(&all_peers, &node_rpc_address).await?;
 
     // Churn nodes and verify the location of the data after VERIFICATION_DELAY
     let mut current_churn_count = 0;
 
+    let mut node_restart = NodeRestart::new(true, false)?;
     let mut node_index = 0;
-
-    let mut running_nodes = network.running_nodes().clone();
     'main: loop {
-        let mut restarted_nodes: Vec<RunningNode> = Vec::new();
+        if current_churn_count >= churn_count {
+            break 'main Ok(());
+        }
+        current_churn_count += 1;
 
-        for nodes in running_nodes {
-            if current_churn_count >= churn_count {
+        let antnode_rpc_endpoint = match node_restart.restart_next(false, false).await? {
+            None => {
+                // we have reached the end.
                 break 'main Ok(());
             }
-            current_churn_count += 1;
+            Some(antnode_rpc_endpoint) => antnode_rpc_endpoint,
+        };
 
-            println!(
-                "Churn #{current_churn_count} Churning a node with peer_id {:?}",
-                nodes.peer_id()
-            );
-            info!(
-                "Churn #{current_churn_count} Churning a node with peer_id {:?}",
-                nodes.peer_id()
-            );
-            let mut initial_peers: Vec<Multiaddr> = vec![];
-            nodes.clone().shutdown();
-            sleep(Duration::from_secs(1)).await;
+        // wait for the dead peer to be removed from the RT and the replication flow to finish
+        println!(
+            "\nNode has been restarted, waiting for {VERIFICATION_DELAY:?} before verification"
+        );
+        info!("\nNode has been restarted, waiting for {VERIFICATION_DELAY:?} before verification");
+        tokio::time::sleep(VERIFICATION_DELAY).await;
 
-            for peer in network.running_nodes() {
-                if let Ok(listen_addrs_with_peer_id) = peer.get_listen_addrs_with_peer_id().await {
-                    initial_peers.extend(listen_addrs_with_peer_id);
-                }
-            }
+        // get the new PeerId for the current NodeIndex
+        let mut rpc_client = get_antnode_rpc_client(antnode_rpc_endpoint).await?;
 
-            let socket_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
-            let node = NodeSpawner::new()
-                .with_socket_addr(socket_addr)
-                .with_evm_network(evm_network.clone())
-                .with_rewards_address(funded_wallet.address())
-                .with_initial_peers(initial_peers)
-                .with_local(true)
-                .with_upnp(false)
-                .with_root_dir(None)
-                .spawn()
-                .await?;
-            sleep(Duration::from_secs(2)).await;
-            let new_peer_id = node.peer_id();
-            println!("A new Node joined the network with peer_id {new_peer_id:?}");
-            restarted_nodes.push(node.clone());
-            network.update_peer(node_index, node);
-            all_peers[node_index] = new_peer_id;
-            node_index += 1;
-
-            print_node_close_groups(&all_peers);
-            verify_location(&all_peers, &network).await?;
+        let response = rpc_client
+            .node_info(Request::new(NodeInfoRequest {}))
+            .await?;
+        let new_peer_id = PeerId::from_bytes(&response.get_ref().peer_id)?;
+        // The below indexing assumes that, the way we do iteration to retrieve all_peers inside get_all_rpc_addresses
+        // and get_all_peer_ids is the same as how we do the iteration inside NodeRestart.
+        // todo: make this more cleaner.
+        if all_peers[node_index] == new_peer_id {
+            println!("new and old peer id are the same {new_peer_id:?}");
+            return Err(eyre!("new and old peer id are the same {new_peer_id:?}"));
         }
-        running_nodes = restarted_nodes;
+        all_peers[node_index] = new_peer_id;
+        node_index += 1;
+
+        print_node_close_groups(&all_peers);
+
+        verify_location(&all_peers, &node_rpc_address).await?;
     }
 }
 
@@ -210,19 +173,17 @@ fn print_node_close_groups(all_peers: &[PeerId]) {
     }
 }
 
-async fn get_records_and_holders(running_network: &RunningNetwork) -> Result<RecordHolders> {
+async fn get_records_and_holders(node_rpc_addresses: &[SocketAddr]) -> Result<RecordHolders> {
     let mut record_holders = RecordHolders::default();
 
-    for (node_index, running_node) in running_network.running_nodes().iter().enumerate() {
-        println!("Getting records for node index {node_index}");
-        let records_response = running_node
-            .get_all_record_addresses()
-            .await?
-            .into_iter()
-            .map(|addr| addr.as_bytes())
-            .collect::<Vec<_>>();
+    for (node_index, rpc_address) in node_rpc_addresses.iter().enumerate() {
+        let mut rpc_client = get_antnode_rpc_client(*rpc_address).await?;
 
-        for bytes in records_response.iter() {
+        let records_response = rpc_client
+            .record_addresses(Request::new(RecordAddressesRequest {}))
+            .await?;
+
+        for bytes in records_response.get_ref().addresses.iter() {
             let key = RecordKey::from(bytes.clone());
             let holders = record_holders.entry(key).or_insert(HashSet::new());
             holders.insert(node_index);
@@ -234,21 +195,18 @@ async fn get_records_and_holders(running_network: &RunningNetwork) -> Result<Rec
 
 // Fetches the record_holders and verifies that the record is stored by the actual closest peers to the RecordKey
 // It has a retry loop built in.
-async fn verify_location(all_peers: &Vec<PeerId>, running_network: &RunningNetwork) -> Result<()> {
+async fn verify_location(all_peers: &Vec<PeerId>, node_rpc_addresses: &[SocketAddr]) -> Result<()> {
     let mut failed = HashMap::new();
 
     println!("*********************************************");
     println!("Verifying data across all peers {all_peers:?}");
     info!("*********************************************");
     info!("Verifying data across all peers {all_peers:?}");
+
     let mut verification_attempts = 0;
     while verification_attempts < VERIFICATION_ATTEMPTS {
         failed.clear();
-        println!(
-            "Verifying data location attempt {}",
-            verification_attempts + 1
-        );
-        let record_holders = get_records_and_holders(running_network).await?;
+        let record_holders = get_records_and_holders(node_rpc_addresses).await?;
         for (key, actual_holders_idx) in record_holders.iter() {
             println!("Verifying {:?}", PrettyPrintRecordKey::from(key));
             info!("Verifying {:?}", PrettyPrintRecordKey::from(key));
@@ -264,7 +222,6 @@ async fn verify_location(all_peers: &Vec<PeerId>, running_network: &RunningNetwo
             .into_iter()
             .map(|(peer_id, _)| peer_id)
             .collect::<BTreeSet<_>>();
-            println!("peers are sorted by the key");
 
             let actual_holders = actual_holders_idx
                 .iter()

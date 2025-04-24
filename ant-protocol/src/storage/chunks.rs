@@ -13,6 +13,14 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use xor_name::XorName;
 
+/// This is the max manually observed overhead when compressing random 4MB of data using Brotli.
+/// It might be possible there could be edge-cases where the overhead is even higher.
+const BROTLI_MAX_OVERHEAD_BYTES: usize = 16;
+
+/// When encrypting chunks, a bit of padding is added to make the size a multiple of 16.
+/// When the chunk size is already a multiple of 16, a full block padding will be added.
+const PKCS7_MAX_PADDING_BYTES: usize = 16;
+
 /// Chunk, an immutable chunk of data
 #[derive(Hash, Eq, PartialEq, PartialOrd, Ord, Clone, custom_debug::Debug)]
 pub struct Chunk {
@@ -25,8 +33,14 @@ pub struct Chunk {
 }
 
 impl Chunk {
-    /// The maximum size of a chunk is 4MB
-    pub const MAX_SIZE: usize = 4 * 1024 * 1024;
+    /// The maximum size of an unencrypted/raw chunk is 4MB.
+    pub const MAX_RAW_SIZE: usize = 4 * 1024 * 1024;
+
+    /// The maximum size of an encrypted chunk is 4MB + 32 bytes.
+    /// + 16 bytes Brotli compression overhead for random data.
+    /// + 16 bytes due to Pkcs7 encryption padding.
+    pub const MAX_SIZE: usize =
+        Self::MAX_RAW_SIZE + BROTLI_MAX_OVERHEAD_BYTES + PKCS7_MAX_PADDING_BYTES;
 
     /// Creates a new instance of `Chunk`.
     pub fn new(value: Bytes) -> Self {

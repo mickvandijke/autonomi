@@ -6,14 +6,17 @@
 // KIND, either express or implied. Please review the Licences for the specific language governing
 // permissions and limitations relating to use of the SAFE Network Software.
 
-use crate::time::{interval, Instant, Interval};
-use crate::Addresses;
-use crate::{driver::PendingGetClosestType, SwarmDriver};
+use crate::{
+    driver::PendingGetClosestType,
+    time::{interval, Instant, Interval},
+    Addresses, NetworkEvent, SwarmDriver,
+};
 use ant_protocol::NetworkAddress;
-use libp2p::kad::K_VALUE;
-use libp2p::{kad::KBucketKey, PeerId};
-use rand::rngs::OsRng;
-use rand::{thread_rng, Rng};
+use libp2p::{
+    kad::{KBucketKey, K_VALUE},
+    PeerId,
+};
+use rand::{rngs::OsRng, Rng};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use std::collections::{btree_map::Entry, BTreeMap};
 use tokio::time::Duration;
@@ -34,7 +37,14 @@ pub(crate) const NETWORK_DISCOVER_INTERVAL: Duration = Duration::from_secs(10);
 const LAST_PEER_ADDED_TIME_LIMIT: Duration = Duration::from_secs(180);
 
 /// The network discovery interval to use if we haven't added any new peers in a while.
-const NO_PEER_ADDED_SLOWDOWN_INTERVAL_MAX_S: u64 = 600;
+const NO_PEER_ADDED_SLOWDOWN_INTERVAL_MAX_S: u64 = 1200;
+
+/// (get_closest_candidates, picked_non_full_bucket_peers, picked_full_bucket_peers)
+type RefreshTargets = (
+    Vec<NetworkAddress>,
+    Vec<(PeerId, Addresses)>,
+    Vec<(PeerId, Addresses)>,
+);
 
 impl SwarmDriver {
     /// This functions triggers network discovery based on when the last peer was added to the RT
@@ -43,47 +53,26 @@ impl SwarmDriver {
     pub(crate) async fn run_network_discover_continuously(
         &mut self,
         current_interval: Duration,
+        round_robin_index: usize,
     ) -> Option<Interval> {
         let (should_discover, new_interval) = self
             .network_discovery
-            .should_we_discover(self.peers_in_rt as u32, current_interval)
+            .should_we_discover(self.peers_in_rt as u32, current_interval, self.is_client)
             .await;
         if should_discover {
-            self.trigger_network_discovery();
+            self.trigger_network_discovery(round_robin_index);
         }
         new_interval
     }
 
-    pub(crate) fn trigger_network_discovery(&mut self) {
+    pub(crate) fn trigger_network_discovery(&mut self, round_robin_index: usize) {
         let now = Instant::now();
 
-        // Find the farthest bucket that is not full.
-        // This is used to skip refreshing the RT of farthest full buckets.
-        let mut farthest_unfilled_bucket = Some(255);
-        let kbuckets: Vec<_> = self.swarm.behaviour_mut().kademlia.kbuckets().collect();
-        // Iterate from 255, 254 and so on by calling `rev()` to tackle the `hole` situation.
-        for kbucket in kbuckets.iter().rev() {
-            if kbucket.num_entries() < K_VALUE.get() {
-                let Some(ilog2) = kbucket.range().0.ilog2() else {
-                    continue;
-                };
-                farthest_unfilled_bucket = Some(ilog2);
-                break;
-            }
-        }
+        let (get_closest_candidates, picked_non_full_bucket_peers, picked_full_bucket_peers) =
+            self.get_refresh_targets(round_robin_index);
 
-        let addrs = self
-            .network_discovery
-            .candidates
-            .get_candidates(farthest_unfilled_bucket);
-        info!(
-            "Triggering network discovery with {} candidates. Farthest non full bucket: {farthest_unfilled_bucket:?}",
-            addrs.len()
-        );
-        // Fetches the candidates and also generates new candidates
-        for addr in addrs {
-            // The query_id is tracked here. This is to update the candidate list of network_discovery with the newly
-            // found closest peers. It may fill up the candidate list of closer buckets which are harder to generate.
+        // send out one get_closest query per non_full_bucket
+        for addr in get_closest_candidates {
             let query_id = self
                 .swarm
                 .behaviour_mut()
@@ -95,8 +84,121 @@ impl SwarmDriver {
             );
         }
 
+        // notify node instance to carry out version queries off thread
+        if !picked_full_bucket_peers.is_empty() {
+            self.send_event(NetworkEvent::PeersForVersionQuery(picked_full_bucket_peers));
+        }
+
+        // notify node instance to carry out version queries off thread
+        if !picked_non_full_bucket_peers.is_empty() {
+            self.send_event(NetworkEvent::PeersForVersionQuery(
+                picked_non_full_bucket_peers,
+            ));
+        }
+
         self.network_discovery.initiated();
         debug!("Trigger network discovery took {:?}", now.elapsed());
+    }
+
+    // Get:
+    //   * get_closest candidates: one for each non-full buckets to query
+    //   * peers_info for a picked non-full bucket
+    //   * peers_info for a picked full bucket
+    fn get_refresh_targets(&mut self, round_robin_index: usize) -> RefreshTargets {
+        // Collect and categorize buckets
+        let kbuckets: Vec<_> = self.swarm.behaviour_mut().kademlia.kbuckets().collect();
+        let (full_buckets, non_full_buckets): (Vec<_>, Vec<_>) = kbuckets
+            .into_iter()
+            .partition(|kb| kb.num_entries() >= K_VALUE.get());
+
+        // Process non-full buckets, collect get_closest candidates
+        let non_full_non_empty_buckets_indexes = non_full_buckets
+            .iter()
+            .filter_map(|kbucket| kbucket.range().0.ilog2())
+            .collect::<Vec<_>>();
+        let full_buckets_index = full_buckets
+            .iter()
+            .filter_map(|kbucket| kbucket.range().0.ilog2())
+            .collect::<Vec<_>>();
+        let get_closest_candidates = self.network_discovery.candidates.get_candidates(
+            non_full_non_empty_buckets_indexes.clone(),
+            full_buckets_index,
+            round_robin_index,
+        );
+        info!(
+            "Going to undertake {} get_closest queries for non_full_buckets {non_full_non_empty_buckets_indexes:?}",
+            get_closest_candidates.len(),
+        );
+
+        // The following liveness check part will only become efficient with large sized network.
+        // Random get_closest will be enough for small sized network.
+        if full_buckets.len() < 2 {
+            return (get_closest_candidates, vec![], vec![]);
+        }
+
+        // Collect peers from one full bucket (round robin)
+        let picked_full_bucket_index = round_robin_index % full_buckets.len();
+        let mut targeted_bucket = None;
+        let picked_full_bucket_peers =
+            if let Some(kbucket) = full_buckets.get(picked_full_bucket_index) {
+                targeted_bucket = kbucket.range().0.ilog2();
+                kbucket
+                    .iter()
+                    .map(|peer_entry| {
+                        (
+                            peer_entry.node.key.into_preimage(),
+                            Addresses(peer_entry.node.value.clone().into_vec()),
+                        )
+                    })
+                    .collect::<Vec<(PeerId, Addresses)>>()
+            } else {
+                error!(
+                    "Full bucket {picked_full_bucket_index} doesn't exists among {} buckets.",
+                    full_buckets.len()
+                );
+                vec![]
+            };
+        info!(
+            "Going to query {} peers of a full bucket {targeted_bucket:?} to check liveness.",
+            picked_full_bucket_peers.len()
+        );
+
+        if non_full_buckets.is_empty() {
+            return (get_closest_candidates, vec![], picked_full_bucket_peers);
+        }
+
+        // Collect peers from one non-full bucket (round robin)
+        let picked_non_full_bucket = round_robin_index % non_full_buckets.len();
+        let mut targeted_bucket = None;
+        let picked_non_full_bucket_peers =
+            if let Some(kbucket) = non_full_buckets.get(picked_non_full_bucket) {
+                targeted_bucket = kbucket.range().0.ilog2();
+                kbucket
+                    .iter()
+                    .map(|peer_entry| {
+                        (
+                            peer_entry.node.key.into_preimage(),
+                            Addresses(peer_entry.node.value.clone().into_vec()),
+                        )
+                    })
+                    .collect::<Vec<(PeerId, Addresses)>>()
+            } else {
+                error!(
+                    "Non full bucket {picked_non_full_bucket} doesn't exists among {} buckets.",
+                    non_full_buckets.len()
+                );
+                vec![]
+            };
+        info!(
+            "Going to query {} peers of a non-full bucket {targeted_bucket:?} to check liveness.",
+            picked_non_full_bucket_peers.len()
+        );
+
+        (
+            get_closest_candidates,
+            picked_non_full_bucket_peers,
+            picked_full_bucket_peers,
+        )
     }
 }
 
@@ -148,8 +250,15 @@ impl NetworkDiscovery {
         &self,
         peers_in_rt: u32,
         current_interval: Duration,
+        is_client: bool,
     ) -> (bool, Option<Interval>) {
         let should_network_discover = peers_in_rt >= 1;
+
+        // When being a client, no need to carry out periodic network_discover,
+        // once completed the initial run.
+        if is_client && self.initial_bootstrap_done {
+            return (false, None);
+        }
 
         // if it has been a while (LAST_PEER_ADDED_TIME_LIMIT) since we have added a new peer,
         // slowdown the network discovery process.
@@ -192,15 +301,15 @@ impl NetworkDiscovery {
     }
 
     /// Returns an exponentially increasing interval based on the number of peers in the routing table.
-    /// Formula: y=30 * 1.00673^x
-    /// Caps out at 600s for 400+ peers
+    /// Formula: y=60 * 1.00673^x
+    /// Caps out at 1200s for 450+ peers
     fn scaled_duration(peers_in_rt: u32) -> Duration {
         if peers_in_rt >= 450 {
-            return Duration::from_secs(600);
+            return Duration::from_secs(1200);
         }
         let base: f64 = 1.00673;
 
-        Duration::from_secs_f64(30.0 * base.powi(peers_in_rt as i32))
+        Duration::from_secs_f64(60.0 * base.powi(peers_in_rt as i32))
     }
 }
 
@@ -209,6 +318,7 @@ impl NetworkDiscovery {
 #[derive(Debug, Clone)]
 struct NetworkDiscoveryCandidates {
     self_key: KBucketKey<PeerId>,
+    self_peer_id: PeerId,
     candidates: BTreeMap<u32, Vec<NetworkAddress>>,
 }
 
@@ -231,6 +341,7 @@ impl NetworkDiscoveryCandidates {
 
         Self {
             self_key,
+            self_peer_id: *self_peer_id,
             candidates,
         }
     }
@@ -265,29 +376,51 @@ impl NetworkDiscoveryCandidates {
         );
     }
 
-    /// Returns one random candidate per bucket. Also tries to refresh the candidate list.
-    /// Set the farthest_bucket to get candidates that are closer than or equal to the farthest_bucket.
-    fn get_candidates(&mut self, farthest_bucket: Option<u32>) -> Vec<&NetworkAddress> {
+    /// Returns one random candidate per non-full bucket. Also tries to refresh the candidate list.
+    fn get_candidates(
+        &mut self,
+        non_full_non_empty_buckets: Vec<u32>,
+        full_buckets: Vec<u32>,
+        round_robin_index: usize,
+    ) -> Vec<NetworkAddress> {
         self.try_refresh_candidates();
 
-        let mut rng = thread_rng();
-        let mut op = Vec::with_capacity(self.candidates.len());
+        // Always add self in
+        let mut targets = vec![NetworkAddress::from(self.self_peer_id)];
 
-        let candidates = self.candidates.iter().filter_map(|(ilog2, candidates)| {
-            if let Some(farthest_bucket) = farthest_bucket {
-                if *ilog2 > farthest_bucket {
-                    debug!(
-                        "Skipping candidates for ilog2: {ilog2} as it is greater than farthest_bucket: {farthest_bucket}"
-                    );
-                    return None;
-                }
+        // Pick targets of non-full-non-empty buckets first
+        targets.extend(
+            non_full_non_empty_buckets
+                .iter()
+                .filter_map(|ilog2| {
+                    if let Some(candidates) = self.candidates.get(ilog2) {
+                        let index = round_robin_index % candidates.len();
+                        candidates.get(index).cloned()
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>(),
+        );
+
+        // Fill up targets with candidates of empty buckets, if has suitable candidate
+        for (ilog2, candidates) in self.candidates.iter() {
+            // Stop when got enough targets
+            if targets.len() >= 10 {
+                break;
             }
-            // get a random index each time
-            let random_index = rng.gen::<usize>() % candidates.len();
-            candidates.get(random_index)
-        });
-        op.extend(candidates);
-        op
+            // Skip non-empty buckets
+            if non_full_non_empty_buckets.contains(ilog2) || full_buckets.contains(ilog2) {
+                continue;
+            }
+
+            let index = round_robin_index % candidates.len();
+            if let Some(candidate) = candidates.get(index).cloned() {
+                targets.push(candidate);
+            }
+        }
+
+        targets
     }
 
     /// Tries to refresh our current candidate list. We replace the old ones with new if we find any.
@@ -371,19 +504,19 @@ mod tests {
     #[test]
     fn test_scaled_interval() {
         let test_cases = vec![
-            (0, 30.0),
-            (50, 40.0),
-            (100, 60.0),
-            (150, 80.0),
-            (200, 115.0),
-            (220, 130.0),
-            (250, 160.0),
-            (300, 220.0),
-            (350, 313.0),
-            (400, 430.0),
-            (425, 520.0),
-            (449, 600.0),
-            (1000, 600.0),
+            (0, 60.0),
+            (50, 80.0),
+            (100, 120.0),
+            (150, 160.0),
+            (200, 230.0),
+            (220, 260.0),
+            (250, 320.0),
+            (300, 440.0),
+            (350, 626.0),
+            (400, 860.0),
+            (425, 1040.0),
+            (449, 1200.0),
+            (1000, 1200.0),
         ];
 
         for (peers, expected_secs) in test_cases {

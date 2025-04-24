@@ -10,8 +10,7 @@
 pub mod client;
 
 use self::client::LocalNetwork;
-use ant_node::spawn::network_spawner::RunningNetwork;
-use ant_protocol::antnode_proto::ant_node_client::AntNodeClient;
+use ant_protocol::antnode_proto::{ant_node_client::AntNodeClient, NodeInfoRequest};
 use ant_service_management::{
     antctl_proto::ant_ctl_client::AntCtlClient, get_local_node_registry_path, NodeRegistry,
 };
@@ -20,7 +19,8 @@ use itertools::Either;
 use libp2p::PeerId;
 use std::{net::SocketAddr, time::Duration};
 use test_utils::testnet::DeploymentInventory;
-use tracing::{error, warn};
+use tonic::Request;
+use tracing::{debug, error, warn};
 
 // type ResultRandomContent = Result<(FilesApi, Bytes, ChunkAddress, Vec<(XorName, PathBuf)>)>;
 
@@ -96,15 +96,22 @@ pub async fn get_antctl_rpc_client(
 }
 
 // Returns all the PeerId for all the running nodes
-pub fn get_all_peer_ids(running_network: &RunningNetwork) -> Result<Vec<PeerId>> {
+pub async fn get_all_peer_ids(node_rpc_addresses: &Vec<SocketAddr>) -> Result<Vec<PeerId>> {
     let mut all_peers = Vec::new();
 
-    for node in running_network.running_nodes().iter() {
-        all_peers.push(node.peer_id());
+    for addr in node_rpc_addresses {
+        let mut rpc_client = get_antnode_rpc_client(*addr).await?;
+
+        // get the peer_id
+        let response = rpc_client
+            .node_info(Request::new(NodeInfoRequest {}))
+            .await?;
+        let peer_id = PeerId::from_bytes(&response.get_ref().peer_id)?;
+        all_peers.push(peer_id);
     }
-    println!(
+    debug!(
         "Obtained the PeerId list for the running network with a node count of {}",
-        all_peers.len()
+        node_rpc_addresses.len()
     );
     Ok(all_peers)
 }

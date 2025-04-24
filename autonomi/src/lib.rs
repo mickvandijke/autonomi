@@ -73,7 +73,7 @@ pub use client::register;
 pub use client::vault;
 
 // Re-exports of the evm types
-pub use ant_evm::utils::get_evm_network;
+pub use ant_evm::utils::{get_evm_network, Error as EvmUtilError};
 pub use ant_evm::EvmNetwork as Network;
 pub use ant_evm::EvmWallet as Wallet;
 pub use ant_evm::QuoteHash;
@@ -84,6 +84,9 @@ pub use ant_evm::{Amount, AttoTokens};
 // Re-exports of address related types
 pub use ant_protocol::storage::AddressParseError;
 pub use xor_name::XorName;
+
+// Re-exports protocol version
+pub use ant_protocol::version;
 
 // Re-exports of the bls types
 pub use bls::{PublicKey, SecretKey, Signature};
@@ -99,6 +102,7 @@ pub use libp2p::Multiaddr;
 #[doc(inline)]
 pub use client::{
     // Client Configs
+    config::BootstrapError,
     config::ClientConfig,
     config::ClientOperatingStrategy,
     config::InitialPeersConfig,

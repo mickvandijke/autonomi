@@ -2,7 +2,7 @@
 authors = ["MaidSafe Developers <dev@maidsafe.net>"]
 description = "TUI for running nodes on the Autonomi network"
 name = "node-launchpad"
-version = "0.5.6"
+version = "0.5.7"
 edition = "2021"
 license = "GPL-3.0"
 homepage = "https://maidsafe.net"
@@ -18,13 +18,13 @@ path = "src/bin/tui/main.rs"
 nightly = []
 
 [dependencies]
-ant-bootstrap = { path = "../ant-bootstrap", version = "0.2.0" }
-ant-build-info = { path = "../ant-build-info", version = "0.1.26" }
-ant-evm = { path = "../ant-evm", version = "0.1.11" }
-ant-node-manager = { version = "0.12.1", path = "../ant-node-manager" }
-ant-protocol = { path = "../ant-protocol", version = "1.0.2" }
+ant-bootstrap = { path = "../ant-bootstrap", version = "0.2.1" }
+ant-build-info = { path = "../ant-build-info", version = "0.1.27" }
+ant-evm = { path = "../ant-evm", version = "0.1.13" }
+ant-node-manager = { version = "0.12.3", path = "../ant-node-manager" }
+ant-protocol = { path = "../ant-protocol", version = "1.0.4" }
 ant-releases = { version = "0.4.0" }
-ant-service-management = { version = "0.4.10", path = "../ant-service-management" }
+ant-service-management = { version = "0.4.12", path = "../ant-service-management" }
 arboard = "3.4.1"
 atty = "0.2.14"
 better-panic = "0.3.0"
@@ -67,7 +67,7 @@ strip-ansi-escapes = "0.2.0"
 strum = { version = "0.26.1", features = ["derive"] }
 sysinfo = "0.30.12"
 throbber-widgets-tui = "0.8.0"
-tokio = { version = "1.32.0", features = ["full"] }
+tokio = { version = "1.43.1", features = ["full"] }
 tokio-util = "0.7.9"
 tracing = "0.1.37"
 tracing-error = "0.2.0"

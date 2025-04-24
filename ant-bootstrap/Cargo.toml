@@ -7,11 +7,11 @@ license = "GPL-3.0"
 name = "ant-bootstrap"
 readme = "README.md"
 repository = "https://github.com/maidsafe/autonomi"
-version = "0.2.0"
+version = "0.2.1"
 
 [dependencies]
-ant-logging = { path = "../ant-logging", version = "0.2.48" }
-ant-protocol = { path = "../ant-protocol", version = "1.0.2" }
+ant-logging = { path = "../ant-logging", version = "0.2.49" }
+ant-protocol = { path = "../ant-protocol", version = "1.0.4" }
 atomic-write-file = "0.2.2"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.2.1", features = ["derive", "env"] }
@@ -24,12 +24,12 @@ reqwest = { version = "0.12.2", default-features = false, features = [
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "1.0"
-tokio = { version = "1.0", features = ["time"] }
+tokio = { version = "1.43", features = ["time"] }
 tracing = "0.1"
 url = "2.4.0"
 
 [dev-dependencies]
 wiremock = "0.5"
-tokio = { version = "1.0", features = ["full", "test-util"] }
+tokio = { version = "1.43", features = ["full", "test-util"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3.8.1"

@@ -17,6 +17,7 @@ pub async fn analyze(
     addr: &str,
     verbose: bool,
     init_peers_config: InitialPeersConfig,
+    network_id: Option<u8>,
 ) -> Result<()> {
     macro_rules! println_if_verbose {
         ($($arg:tt)*) => {
@@ -28,7 +29,9 @@ pub async fn analyze(
     println_if_verbose!("Analyzing address: {}", addr);
 
     // then connect to network and check data
-    let client = crate::actions::connect_to_network(init_peers_config).await?;
+    let client = crate::actions::connect_to_network(init_peers_config, network_id)
+        .await
+        .map_err(|(err, _)| err)?;
 
     let analysis = client.analyze_address(addr, verbose).await;
     match analysis {
