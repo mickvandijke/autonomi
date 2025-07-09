@@ -11,6 +11,7 @@ use crate::contract::network_token::NetworkTokenContract::NetworkTokenContractIn
 use crate::retry;
 use crate::retry::{retry, send_transaction_with_retries};
 use crate::transaction_config::TransactionConfig;
+use crate::wallet::{PermitSignature, SignedPermit};
 use alloy::providers::{Network, Provider};
 use alloy::sol;
 use alloy::transports::{RpcError, TransportErrorKind};
@@ -145,6 +146,45 @@ where
         let calldata = self
             .contract
             .transfer(receiver, amount)
+            .calldata()
+            .to_owned();
+        (calldata, *self.contract.address())
+    }
+
+    /// Get the name of the token.
+    pub async fn name(&self) -> Result<String, Error> {
+        debug!("Getting token name");
+        let name = retry(|| async { self.contract.name().call().await }, "name", None).await?;
+        debug!("Token name is: {name}");
+        Ok(name)
+    }
+
+    /// Get the nonce for the given address.
+    pub async fn nonces(&self, owner: Address) -> Result<U256, Error> {
+        debug!("Getting nonce for address: {owner}");
+        let nonce = retry(
+            || async { self.contract.nonces(owner).call().await },
+            "nonces",
+            None,
+        )
+        .await?;
+        debug!("Nonce for address {owner} is: {nonce}");
+        Ok(nonce)
+    }
+
+    /// Get permit calldata.
+    pub fn permit_calldata(&self, permit: SignedPermit) -> (Calldata, Address) {
+        let calldata = self
+            .contract
+            .permit(
+                permit.owner,
+                permit.spender,
+                permit.value,
+                permit.deadline,
+                permit.v,
+                permit.r,
+                permit.s,
+            )
             .calldata()
             .to_owned();
         (calldata, *self.contract.address())

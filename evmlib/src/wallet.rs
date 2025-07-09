@@ -16,6 +16,7 @@ use crate::utils::http_provider;
 use crate::{Network, TX_TIMEOUT};
 use alloy::hex::ToHexExt;
 use alloy::network::{Ethereum, EthereumWallet, NetworkWallet, TransactionBuilder};
+use alloy::primitives::FixedBytes;
 use alloy::providers::fillers::{
     BlobGasFiller, ChainIdFiller, FillProvider, GasFiller, JoinFill, NonceFiller,
     SimpleNonceManager, WalletFiller,
@@ -23,10 +24,36 @@ use alloy::providers::fillers::{
 use alloy::providers::{Identity, Provider, ProviderBuilder, RootProvider};
 use alloy::rpc::types::TransactionRequest;
 use alloy::signers::local::{LocalSigner, PrivateKeySigner};
+use alloy::signers::{Signature, Signer};
+use alloy::sol;
+use alloy::sol_types::{eip712_domain, SolStruct};
 use alloy::transports::http::reqwest;
 use alloy::transports::{RpcError, TransportErrorKind};
+use serde::Serialize;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+
+sol! {
+    #[allow(missing_docs)]
+    #[derive(Serialize)]
+    struct Permit {
+        address owner;
+        address spender;
+        uint256 value;
+        uint256 nonce;
+        uint256 deadline;
+    }
+}
+
+pub struct SignedPermit {
+    pub owner: Address,
+    pub spender: Address,
+    pub value: U256,
+    pub deadline: U256,
+    pub v: u8,
+    pub r: FixedBytes<32>,
+    pub s: FixedBytes<32>,
+}
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -34,6 +61,8 @@ pub enum Error {
     InsufficientTokensForQuotes(Amount, Amount),
     #[error("Private key is invalid")]
     PrivateKeyInvalid,
+    #[error("Error during signing: {0}")]
+    SigningError(String),
     #[error(transparent)]
     RpcError(#[from] RpcError<TransportErrorKind>),
     #[error("Network token contract error: {0}")]
@@ -42,44 +71,59 @@ pub enum Error {
     ChunkPaymentsContract(#[from] payment_vault::error::Error),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Wallet {
-    wallet: EthereumWallet,
+    signer: PrivateKeySigner,
     network: Network,
     transaction_config: TransactionConfig,
     lock: Arc<tokio::sync::Mutex<()>>,
 }
 
+impl std::fmt::Debug for Wallet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Wallet")
+            .field("signer", &self.signer.address())
+            .field("network", &self.network)
+            .field("transaction_config", &self.transaction_config)
+            .finish()
+    }
+}
+
 impl Wallet {
-    /// Creates a new Wallet object with the specific Network and EthereumWallet.
-    pub fn new(network: Network, wallet: EthereumWallet) -> Self {
+    /// Creates a new Wallet object with the specific Network and PrivateKeySigner.
+    pub fn new(network: Network, signer: PrivateKeySigner) -> Self {
         Self {
-            wallet,
+            signer,
             network,
             transaction_config: Default::default(),
             lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
-    /// Convenience function that creates a new Wallet with a random EthereumWallet.
+    /// Convenience function that creates a new Wallet with a random PrivateKeySigner.
     pub fn new_with_random_wallet(network: Network) -> Self {
         Self::new(network, random())
     }
 
     /// Creates a new Wallet based on the given Ethereum private key. It will fail with Error::PrivateKeyInvalid if private_key is invalid.
     pub fn new_from_private_key(network: Network, private_key: &str) -> Result<Self, Error> {
-        let wallet = from_private_key(private_key)?;
-        Ok(Self::new(network, wallet))
+        let signer = signer_from_private_key(private_key)?;
+        Ok(Self::new(network, signer))
     }
 
     /// Returns the address of this wallet.
     pub fn address(&self) -> Address {
-        wallet_address(&self.wallet)
+        self.signer.address()
     }
 
     /// Returns the `Network` of this wallet.
     pub fn network(&self) -> &Network {
         &self.network
+    }
+
+    /// Returns an EthereumWallet.
+    pub fn to_ethereum_wallet(&self) -> EthereumWallet {
+        EthereumWallet::new(self.signer.clone())
     }
 
     /// Returns the raw balance of payment tokens for this wallet.
@@ -99,7 +143,7 @@ impl Wallet {
         amount: U256,
     ) -> Result<TxHash, network_token::Error> {
         transfer_tokens(
-            self.wallet.clone(),
+            self.to_ethereum_wallet(),
             &self.network,
             to,
             amount,
@@ -114,7 +158,7 @@ impl Wallet {
         to: Address,
         amount: U256,
     ) -> Result<TxHash, network_token::Error> {
-        transfer_gas_tokens(self.wallet.clone(), &self.network, to, amount).await
+        transfer_gas_tokens(self.to_ethereum_wallet(), &self.network, to, amount).await
     }
 
     /// See how many tokens of the owner may be spent by the spender.
@@ -129,7 +173,7 @@ impl Wallet {
         amount: U256,
     ) -> Result<TxHash, network_token::Error> {
         approve_to_spend_tokens(
-            self.wallet.clone(),
+            self.to_ethereum_wallet(),
             &self.network,
             spender,
             amount,
@@ -145,7 +189,7 @@ impl Wallet {
         quote_payments: I,
     ) -> Result<BTreeMap<QuoteHash, TxHash>, PayForQuotesError> {
         pay_for_quotes(
-            self.wallet.clone(),
+            self.to_ethereum_wallet(),
             &self.network,
             quote_payments,
             &self.transaction_config,
@@ -155,7 +199,7 @@ impl Wallet {
 
     /// Build a provider using this wallet.
     pub fn to_provider(&self) -> ProviderWithWallet {
-        http_provider_with_wallet(self.network.rpc_url().clone(), self.wallet.clone())
+        http_provider_with_wallet(self.network.rpc_url().clone(), self.to_ethereum_wallet())
     }
 
     /// Lock the wallet to prevent concurrent use.
@@ -174,21 +218,83 @@ impl Wallet {
     pub fn set_transaction_config(&mut self, config: TransactionConfig) {
         self.transaction_config = config;
     }
+
+    /// Creates a permit for token spending approval using EIP-2612.
+    pub async fn sign_permit(
+        &self,
+        token_address: Address,
+        spender: Address,
+        value: U256,
+        deadline: U256,
+    ) -> Result<SignedPermit, Error> {
+        let owner = self.address();
+
+        debug!("Creating permit for owner {owner} spender {spender} token {token_address} value {value}");
+
+        let provider = http_provider(self.network.rpc_url().clone());
+        let chain_id = provider.get_chain_id().await?;
+        let network_token = NetworkToken::new(*self.network.payment_token_address(), provider);
+
+        let token_name = network_token.name().await?;
+        let nonce = network_token.nonces(owner).await?;
+
+        let domain = eip712_domain! {
+            name: token_name,
+            version: "1",
+            chain_id: chain_id,
+            verifying_contract: token_address,
+        };
+
+        let permit = Permit {
+            owner,
+            spender,
+            value,
+            nonce,
+            deadline,
+        };
+
+        let hash = permit.eip712_signing_hash(&domain);
+
+        let signature = self
+            .signer
+            .sign_hash(&hash)
+            .await
+            .map_err(|err| Error::SigningError(err.to_string()))?;
+
+        Ok(SignedPermit {
+            owner,
+            spender,
+            value,
+            deadline,
+            v: signature.v() as u8,
+            r: signature.r().into(),
+            s: signature.s().into(),
+        })
+    }
+
+    pub async fn create_smart_account(&self) {
+        // Calculate deadline (2 hours from now)
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let deadline = U256::from(now + 7200);
+
+        let signed_permit = self.sign_permit()
+    }
 }
 
-/// Generate an EthereumWallet with a random private key.
-fn random() -> EthereumWallet {
-    let signer: PrivateKeySigner = LocalSigner::random();
-    EthereumWallet::from(signer)
+/// Generate a PrivateKeySigner with a random private key.
+fn random() -> PrivateKeySigner {
+    LocalSigner::random()
 }
 
 /// Creates a wallet from a private key in HEX format.
-fn from_private_key(private_key: &str) -> Result<EthereumWallet, Error> {
-    let signer: PrivateKeySigner = private_key.parse().map_err(|err| {
+fn signer_from_private_key(private_key: &str) -> Result<PrivateKeySigner, Error> {
+    private_key.parse().map_err(|err| {
         error!("Error parsing private key: {err}");
         Error::PrivateKeyInvalid
-    })?;
-    Ok(EthereumWallet::from(signer))
+    })
 }
 
 // TODO(optimization): Find a way to reuse/persist contracts and/or a provider without the wallet nonce going out of sync
@@ -411,15 +517,14 @@ pub async fn pay_for_quotes<T: IntoIterator<Item = QuotePayment>>(
 mod tests {
     use crate::common::Amount;
     use crate::testnet::Testnet;
-    use crate::wallet::{from_private_key, Wallet};
-    use alloy::network::{Ethereum, EthereumWallet, NetworkWallet};
+    use crate::wallet::{signer_from_private_key, Wallet};
     use alloy::primitives::address;
 
     #[tokio::test]
-    async fn test_from_private_key() {
+    async fn test_signer_from_private_key() {
         let private_key = "bf210844fa5463e373974f3d6fbedf451350c3e72b81b3c5b1718cb91f49c33d"; // DevSkim: ignore DS117838
-        let wallet = from_private_key(private_key).unwrap();
-        let account = <EthereumWallet as NetworkWallet<Ethereum>>::default_signer_address(&wallet);
+        let signer = signer_from_private_key(private_key).unwrap();
+        let account = signer.address();
 
         // Assert that the addresses are the same, i.e. the wallet was successfully created from the private key
         assert_eq!(

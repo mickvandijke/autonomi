@@ -29,6 +29,7 @@ impl Client {
         to_dest: PathBuf,
     ) -> Result<(), DownloadError> {
         let data = self.data_get_public(data_addr).await?;
+
         if let Some(parent) = to_dest.parent() {
             tokio::fs::create_dir_all(parent).await?;
             debug!("Created parent directories {parent:?} for {to_dest:?}");
@@ -47,6 +48,9 @@ impl Client {
         let archive = self.archive_get_public(archive_addr).await?;
         debug!("Downloaded archive for the directory from the network at {archive_addr:?}");
         for (path, addr, _meta) in archive.iter() {
+            // Necessary conversion for older archives uploaded using Windows.
+            // Windows also supports reading forward slashes.
+            let path = PathBuf::from(path.to_string_lossy().replace(r"\", "/"));
             self.file_download_public(addr, to_dest.join(path)).await?;
         }
         debug!(

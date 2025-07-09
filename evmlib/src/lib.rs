@@ -23,6 +23,8 @@ pub mod contract;
 pub mod cryptography;
 #[cfg(feature = "external-signer")]
 pub mod external_signer;
+mod paymaster;
+mod permit;
 pub mod quoting_metrics;
 mod retry;
 pub mod testnet;
