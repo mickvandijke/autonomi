@@ -6,10 +6,10 @@
 // KIND, either express or implied. Please review the Licences for the specific language governing
 // permissions and limitations relating to use of the SAFE Network Software.
 
-use crate::networking::NetworkError;
+use crate::networking::{NetworkError, Quorum};
 use crate::Client;
 use ant_protocol::NetworkAddress;
-use libp2p::kad::PeerInfo;
+use libp2p::kad::{PeerInfo, Record};
 
 impl Client {
     /// Retrieve the closest peers to the given network address.
@@ -20,5 +20,11 @@ impl Client {
         self.network
             .get_closest_peers_with_retries(network_address.into())
             .await
+    }
+
+    pub async fn put_record(&self, record: Record, to: Vec<PeerInfo>) -> Result<(), NetworkError> {
+        let quorum = Quorum::One;
+
+        self.network.put_record(record, to, quorum).await
     }
 }

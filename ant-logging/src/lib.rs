@@ -289,7 +289,7 @@ impl LogBuilder {
             format!("{test_file_name}=TRACE,all,autonomi=DEBUG,all")
         } else {
             // For unit tests, use the original pattern
-            format!("{test_file_name}=TRACE,{test_file_name}::tests=TRACE,all,autonomi=DEBUG,all")
+            format!("{test_file_name}=TRACE,{test_file_name}::tests=TRACE,all,autonomi=DEBUG,all,libp2p=TRACE")
         };
 
         println!("Setting ANT_LOG to: {log_pattern}");

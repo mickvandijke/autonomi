@@ -11,7 +11,6 @@ use crate::{
     error::{Error, Result},
     BootstrapCacheConfig, BootstrapCacheStore, ContactsFetcher,
 };
-use ant_protocol::version::{get_network_id, ALPHANET_ID, MAINNET_ID};
 use clap::Args;
 use libp2p::Multiaddr;
 use serde::{Deserialize, Serialize};
@@ -180,23 +179,23 @@ impl InitialPeersConfig {
             }
         }
 
-        if !self.local && get_network_id() == MAINNET_ID {
-            let mut contacts_fetcher = ContactsFetcher::with_mainnet_endpoints()?;
-            if let Some(count) = count {
-                contacts_fetcher.set_max_addrs(count);
-            }
-            info!("Fetching bootstrap address from mainnet contacts");
-            let addrs = contacts_fetcher.fetch_bootstrap_addresses().await?;
-            bootstrap_addresses.extend(addrs);
-        } else if !self.local && get_network_id() == ALPHANET_ID {
-            let mut contacts_fetcher = ContactsFetcher::with_alphanet_endpoints()?;
-            if let Some(count) = count {
-                contacts_fetcher.set_max_addrs(count);
-            }
-            info!("Fetching bootstrap address from alphanet contacts");
-            let addrs = contacts_fetcher.fetch_bootstrap_addresses().await?;
-            bootstrap_addresses.extend(addrs);
-        }
+        // if !self.local && get_network_id() == MAINNET_ID {
+        //     let mut contacts_fetcher = ContactsFetcher::with_mainnet_endpoints()?;
+        //     if let Some(count) = count {
+        //         contacts_fetcher.set_max_addrs(count);
+        //     }
+        //     info!("Fetching bootstrap address from mainnet contacts");
+        //     let addrs = contacts_fetcher.fetch_bootstrap_addresses().await?;
+        //     bootstrap_addresses.extend(addrs);
+        // } else if !self.local && get_network_id() == ALPHANET_ID {
+        //     let mut contacts_fetcher = ContactsFetcher::with_alphanet_endpoints()?;
+        //     if let Some(count) = count {
+        //         contacts_fetcher.set_max_addrs(count);
+        //     }
+        //     info!("Fetching bootstrap address from alphanet contacts");
+        //     let addrs = contacts_fetcher.fetch_bootstrap_addresses().await?;
+        //     bootstrap_addresses.extend(addrs);
+        // }
 
         if !bootstrap_addresses.is_empty() {
             if let Some(count) = count {
