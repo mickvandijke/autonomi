@@ -7,7 +7,7 @@ sol!(
     #[allow(missing_docs)]
     #[sol(rpc)]
     PaymentVaultImplementation,
-    "artifacts/PaymentVaultNoProxyV6.json"
+    "artifacts/PaymentVaultNoProxyV7.json"
 );
 
 /// Deploys the payment vault contract and returns the contract address

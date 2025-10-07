@@ -8,7 +8,7 @@ sol!(
     #[derive(Debug)]
     #[sol(rpc)]
     IPaymentVault,
-    "abi/IPaymentVaultV6.json"
+    "abi/IPaymentVaultV2.json"
 );
 
 impl From<(QuoteHash, QuotingMetrics, Address)> for IPaymentVault::PaymentVerification {
