@@ -209,17 +209,10 @@ async fn test_payment_modes_cost_estimation() -> Result<()> {
         "Medium data should have higher or equal cost than small data in SingleNode mode. Medium: {medium_cost_single}, Small: {small_cost_single}"
     );
 
-    // Verify payment modes have the same total cost (both pay 3x total)
-    // Standard mode: pays 3 nodes with 1x each = 3x total
-    // SingleNode mode: pays 1 node with 3x = 3x total
-    assert_eq!(
-        small_cost_standard, small_cost_single,
-        "Standard and SingleNode modes should have the same total cost for same size data"
-    );
-    assert_eq!(
-        medium_cost_standard, medium_cost_single,
-        "Standard and SingleNode modes should have the same total cost for same size data"
-    );
+    // Payment modes now have different cost structures:
+    // Standard mode: pays sum of 3 highest quotes
+    // SingleNode mode: pays 1 median node with 3x
+    // These modes may have different total costs depending on the quote distribution
 
     // All costs should be greater than zero
     assert!(
@@ -232,7 +225,8 @@ async fn test_payment_modes_cost_estimation() -> Result<()> {
     );
 
     println!("✅ Payment mode cost tests completed successfully");
-    println!("   Standard and SingleNode modes have the same total cost (3x)");
+    println!("   Standard mode pays sum of 3 highest quotes");
+    println!("   SingleNode mode pays 1 median node with 3x = 3x total");
     println!("   SingleNode mode saves gas fees by paying only one node");
     println!("   Costs scale appropriately with data size");
     println!("   All data was successfully uploaded and downloaded");

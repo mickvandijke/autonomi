@@ -26,7 +26,7 @@ pub enum PaymentMode {
     /// Default mode: Pay 3 nodes
     #[default]
     Standard,
-    /// Alternative mode: Pay only the highest priced node with 3x the quoted amount
+    /// Alternative mode: Pay only the median priced node with 3x the quoted amount
     SingleNode,
 }
 
@@ -277,7 +277,7 @@ impl Client {
         Ok(quotes_to_pay_per_addr)
     }
 
-    /// Process quotes for single node payment mode (pay only highest priced node with 3x amount)
+    /// Process quotes for single node payment mode (pay only median priced node with 3x amount)
     fn process_single_node_payment_quotes(
         &self,
         quotes_per_addr: HashMap<XorName, Vec<(PeerId, Addresses, PaymentQuote, Amount)>>,
@@ -323,31 +323,31 @@ impl Client {
         ])
     }
 
-    /// Create a payment structure for single node mode (pay only the highest priced node with 3x the amount)
+    /// Create a payment structure for single node mode (pay only the median priced node with 3x the amount)
     fn create_single_node_quote_payment(
         &self,
         quotes: &mut [(PeerId, Addresses, PaymentQuote, Amount)],
         content_addr: XorName,
     ) -> QuoteForAddress {
-        // Get the highest priced node (index 4 after already sorting by price)
-        let (p5, a5, q5, highest_price) = &quotes[4];
-        let enhanced_price = *highest_price * Amount::from(3u64);
+        // Get the median priced node (index 2 after already sorting by price)
+        let (p3, a3, q3, median_price) = &quotes[2];
+        let enhanced_price = *median_price * Amount::from(3u64);
 
         trace!(
-            "Single peer to pay for {content_addr}: {p5:?} with price {enhanced_price} (3x of {highest_price})"
+            "Single peer to pay for {content_addr}: {p3:?} with price {enhanced_price} (3x of {median_price})"
         );
 
         let (p1, a1, q1, _) = &quotes[0];
         let (p2, a2, q2, _) = &quotes[1];
-        let (p3, a3, q3, _) = &quotes[2];
         let (p4, a4, q4, _) = &quotes[3];
+        let (p5, a5, q5, _) = &quotes[4];
 
         QuoteForAddress(vec![
             (*p1, a1.clone(), q1.clone(), Amount::ZERO),
             (*p2, a2.clone(), q2.clone(), Amount::ZERO),
-            (*p3, a3.clone(), q3.clone(), Amount::ZERO),
+            (*p3, a3.clone(), q3.clone(), enhanced_price),
             (*p4, a4.clone(), q4.clone(), Amount::ZERO),
-            (*p5, a5.clone(), q5.clone(), enhanced_price),
+            (*p5, a5.clone(), q5.clone(), Amount::ZERO),
         ])
     }
 
