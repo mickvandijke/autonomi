@@ -1,0 +1,160 @@
+name: macOS signing PoC
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Set to build a particular branch
+        type: string
+      tag:
+        description: Set to build a particular tag
+        type: string
+
+jobs:
+  build-and-sign-macos:
+    name: build and sign macOS binaries
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        target: [ x86_64-apple-darwin, aarch64-apple-darwin ]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || inputs.branch }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: cargo-bins/cargo-binstall@main
+      - shell: bash
+        run: cargo binstall --no-confirm just
+
+      - shell: bash
+        run: just build-release-artifacts "${{ matrix.target }}"
+
+      # Install Apple certificate from secrets
+      - name: Import code signing certificate
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          # Create a temporary keychain
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+          # Import certificate to keychain
+          echo "$MACOS_CERTIFICATE" | base64 --decode > certificate.p12
+          security import certificate.p12 -k $KEYCHAIN_PATH -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+          # Add keychain to search list
+          security list-keychain -d user -s $KEYCHAIN_PATH
+
+      # Sign all macOS binaries in the artifacts directory
+      - name: Sign macOS binaries
+        env:
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+        run: |
+          ARTIFACTS_PATH="artifacts"
+
+          # Find all binaries (executables without .dylib extension)
+          BINARIES=$(find "$ARTIFACTS_PATH" -type f -perm +111 ! -name "*.dylib" ! -name "*.d" ! -name ".cargo-lock")
+
+          if [ -z "$BINARIES" ]; then
+            echo "Error: No binaries found in $ARTIFACTS_PATH"
+            exit 1
+          fi
+
+          echo "Found binaries to sign:"
+          echo "$BINARIES" | while read -r binary; do
+            echo "  - $(basename "$binary")"
+          done
+          echo ""
+
+          # Sign each binary
+          echo "$BINARIES" | while read -r binary; do
+            echo "Signing: $(basename "$binary")"
+            codesign --force --sign "$MACOS_SIGNING_IDENTITY" \
+              --options runtime \
+              --timestamp \
+              --verbose \
+              "$binary"
+
+            if [ $? -ne 0 ]; then
+              echo "Error: Failed to sign $(basename "$binary")"
+              exit 1
+            fi
+          done
+
+          echo ""
+          echo "All binaries signed successfully!"
+
+      # Verify code signatures
+      - name: Verify signatures
+        run: |
+          ARTIFACTS_PATH="artifacts"
+          BINARIES=$(find "$ARTIFACTS_PATH" -type f -perm +111 ! -name "*.dylib" ! -name "*.d" ! -name ".cargo-lock")
+
+          echo "Verifying signatures:"
+          FAILED=()
+
+          echo "$BINARIES" | while read -r binary; do
+            echo "Verifying: $(basename "$binary")"
+            if codesign --verify --deep --strict --verbose=2 "$binary" 2>&1; then
+              echo "  ✓ Signature valid"
+              codesign -dvv "$binary" 2>&1 | grep -E "(Authority|Timestamp|Identifier)"
+            else
+              echo "  ✗ Signature verification failed"
+              FAILED+=("$(basename "$binary")")
+            fi
+            echo ""
+          done
+
+          if [ ${#FAILED[@]} -gt 0 ]; then
+            echo "Error: Signature verification failed for: ${FAILED[*]}"
+            exit 1
+          fi
+
+          echo "All signatures verified successfully!"
+
+      # Create zip file with all binaries and notarize
+      - name: Create zip and notarize
+        env:
+          MACOS_NOTARIZATION_APPLE_ID: ${{ secrets.MACOS_NOTARIZATION_APPLE_ID }}
+          MACOS_NOTARIZATION_TEAM_ID: ${{ secrets.MACOS_NOTARIZATION_TEAM_ID }}
+          MACOS_NOTARIZATION_PASSWORD: ${{ secrets.MACOS_NOTARIZATION_PASSWORD }}
+        run: |
+          ARTIFACTS_PATH="artifacts"
+          BINARIES=$(find "$ARTIFACTS_PATH" -type f -perm +111 ! -name "*.dylib" ! -name "*.d" ! -name ".cargo-lock")
+          ZIP_NAME="autonomi-${{ matrix.target }}-signed.zip"
+
+          echo "Creating zip file with all binaries..."
+          echo "Binaries to include:"
+          echo "$BINARIES" | while read -r binary; do
+            echo "  - $(basename "$binary")"
+          done
+          echo ""
+
+          # Create zip file with all binaries
+          ditto -c -k --keepParent "$ARTIFACTS_PATH" "$ZIP_NAME"
+
+          echo "Submitting zip file to Apple notary service..."
+          xcrun notarytool submit "$ZIP_NAME" \
+            --apple-id "$MACOS_NOTARIZATION_APPLE_ID" \
+            --team-id "$MACOS_NOTARIZATION_TEAM_ID" \
+            --password "$MACOS_NOTARIZATION_PASSWORD" \
+            --wait \
+            --timeout 30m
+
+          if [ $? -ne 0 ]; then
+            echo "Error: Notarization failed for zip file"
+            exit 1
+          fi
+
+          echo "Zip file notarized successfully!"
+
+      # Upload signed and notarized zip file
+      - uses: actions/upload-artifact@v4
+        with:
+          name: autonomi-${{ matrix.target }}-signed
+          path: autonomi-${{ matrix.target }}-signed.zip
