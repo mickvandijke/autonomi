@@ -132,6 +132,20 @@ pub(super) enum NetworkTask {
         #[debug(skip)]
         resp: OneShotTaskResult<DevGetClosestPeersFromNetworkResponse>,
     },
+    /// Developer analytics: Get closest peers using majority knowledge.
+    /// The node queries multiple peers and aggregates their views to build consensus.
+    /// Only available when the `developer` feature is enabled.
+    #[cfg(feature = "developer")]
+    DevGetClosestPeersWithMajorityFromNode {
+        /// Target address to find closest peers for
+        addr: NetworkAddress,
+        /// The node to ask (will build majority knowledge)
+        peer: PeerInfo,
+        /// Number of candidates to return (defaults to 16 for merkle pool)
+        num_of_candidates: Option<usize>,
+        #[debug(skip)]
+        resp: OneShotTaskResult<DevGetClosestPeersWithMajorityFromNodeResponse>,
+    },
 }
 
 /// Response from DevGetClosestPeersFromNetwork
@@ -144,5 +158,19 @@ pub struct DevGetClosestPeersFromNetworkResponse {
     /// The node that performed the network query
     pub queried_node: NetworkAddress,
     /// The closest peers found by that node's network query
+    pub peers: Vec<(NetworkAddress, Vec<libp2p::Multiaddr>)>,
+}
+
+/// Response from DevGetClosestPeersWithMajorityFromNode
+/// Contains peers determined by majority consensus from multiple node queries.
+/// Uses the same majority knowledge algorithm as merkle payment verification.
+#[cfg(feature = "developer")]
+#[derive(Debug, Clone)]
+pub struct DevGetClosestPeersWithMajorityFromNodeResponse {
+    /// The target address that was queried
+    pub target: NetworkAddress,
+    /// The node that performed the majority knowledge aggregation
+    pub queried_node: NetworkAddress,
+    /// Closest peers with majority consensus, sorted by distance
     pub peers: Vec<(NetworkAddress, Vec<libp2p::Multiaddr>)>,
 }

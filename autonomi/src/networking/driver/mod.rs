@@ -44,6 +44,11 @@ use ant_protocol::constants::{
 };
 
 /// Libp2p defaults to 10s which is quite fast, we are more patient
+/// When developer feature is enabled, use a longer timeout to allow
+/// developer queries (which trigger node-side network operations) to complete.
+#[cfg(feature = "developer")]
+pub const REQ_TIMEOUT: Duration = Duration::from_secs(180);
+#[cfg(not(feature = "developer"))]
 pub const REQ_TIMEOUT: Duration = Duration::from_secs(30);
 /// Libp2p defaults to 60s for kad queries, we are more patient
 pub const KAD_QUERY_TIMEOUT: Duration = Duration::from_secs(120);
@@ -552,6 +557,32 @@ impl NetworkDriver {
                         addr,
                         peer,
                         num_of_peers,
+                        resp,
+                    },
+                );
+            }
+            #[cfg(feature = "developer")]
+            NetworkTask::DevGetClosestPeersWithMajorityFromNode {
+                addr,
+                peer,
+                num_of_candidates,
+                resp,
+            } => {
+                let req = Request::Query(Query::DevGetClosestPeersWithMajorityFromNode {
+                    key: addr.clone(),
+                    num_of_candidates,
+                });
+
+                let req_id =
+                    self.req()
+                        .send_request_with_addresses(&peer.peer_id, req, peer.addrs.clone());
+
+                self.pending_tasks.insert_query(
+                    req_id,
+                    NetworkTask::DevGetClosestPeersWithMajorityFromNode {
+                        addr,
+                        peer,
+                        num_of_candidates,
                         resp,
                     },
                 );

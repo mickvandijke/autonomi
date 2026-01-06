@@ -11,7 +11,7 @@ mod merkle_tree;
 
 // Re-export types from evmlib (minimal types)
 pub use evmlib::merkle_batch_payment::{
-    CANDIDATES_PER_POOL, MAX_MERKLE_DEPTH, OnChainPaymentInfo, PoolCommitment,
+    CANDIDATES_PER_POOL, MAX_MERKLE_DEPTH, OnChainPaymentInfo, PEERS_TO_QUERY, PoolCommitment,
     expected_reward_pools,
 };
 

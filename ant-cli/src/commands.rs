@@ -505,6 +505,28 @@ pub enum DeveloperCmd {
         #[arg(long)]
         compare: bool,
     },
+    /// Compare merkle payment candidates between client and node perspectives.
+    ///
+    /// This command simulates the complete merkle candidate selection and verification flow:
+    /// 1. Client side: Queries closest peers, selects top candidates for payment
+    /// 2. Node side: Uses majority knowledge (same algorithm as payment verification)
+    ///    to determine which peers should be the closest
+    /// 3. Compares client's candidates against node's majority knowledge view
+    ///
+    /// This helps diagnose payment verification failures by showing discrepancies
+    /// between what the client selects and what nodes would accept.
+    MerkleCandidates {
+        /// Node to query for majority knowledge verification.
+        ///
+        /// Examples:
+        ///   - PeerId: 12D3KooWRBhwfeP2Y4TCx1SM6s9rUoHhR5STiGwxBhgFRcw3UERE
+        ///   - Multiaddr: /ip4/127.0.0.1/udp/12000/quic-v1/p2p/12D3KooW...
+        #[arg(name = "node")]
+        node_addr: String,
+        /// Target address (the payment midpoint address, hex string or PeerId).
+        #[arg(name = "target")]
+        target: String,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -759,6 +781,9 @@ pub async fn handle_subcommand(opt: Opt) -> Result<()> {
             } => {
                 developer::closest_peers(&node_addr, &target, num_peers, compare, network_context)
                     .await
+            }
+            DeveloperCmd::MerkleCandidates { node_addr, target } => {
+                developer::merkle_candidates(&node_addr, &target, network_context).await
             }
         },
         None => {

@@ -112,6 +112,16 @@ pub enum Query {
         /// Number of peers to return (optional, defaults to K_VALUE)
         num_of_peers: Option<usize>,
     },
+    /// Developer/analytics query: Ask a node to determine closest peers using majority knowledge.
+    /// The node queries multiple peers and aggregates their views to build consensus.
+    /// Only available when the `developer` feature is enabled.
+    #[cfg(feature = "developer")]
+    DevGetClosestPeersWithMajorityFromNode {
+        /// Target address to find closest peers for
+        key: NetworkAddress,
+        /// Number of candidates to return (defaults to 16 for merkle pool)
+        num_of_candidates: Option<usize>,
+    },
 }
 
 impl Query {
@@ -128,6 +138,8 @@ impl Query {
             | Query::GetMerkleCandidateQuote { key, .. } => key.clone(),
             #[cfg(feature = "developer")]
             Query::DevGetClosestPeersFromNetwork { key, .. } => key.clone(),
+            #[cfg(feature = "developer")]
+            Query::DevGetClosestPeersWithMajorityFromNode { key, .. } => key.clone(),
             Query::PutRecord { holder, .. } => holder.clone(),
         }
     }
@@ -207,6 +219,16 @@ impl std::fmt::Display for Query {
                 write!(
                     f,
                     "Query::DevGetClosestPeersFromNetwork({key:?} {num_of_peers:?})"
+                )
+            }
+            #[cfg(feature = "developer")]
+            Query::DevGetClosestPeersWithMajorityFromNode {
+                key,
+                num_of_candidates,
+            } => {
+                write!(
+                    f,
+                    "Query::DevGetClosestPeersWithMajorityFromNode({key:?} {num_of_candidates:?})"
                 )
             }
         }

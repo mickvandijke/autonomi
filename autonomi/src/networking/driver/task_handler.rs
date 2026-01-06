@@ -12,6 +12,8 @@ use crate::networking::PeerQuoteWithStorageProof;
 use crate::networking::interface::NetworkTask;
 #[cfg(feature = "developer")]
 use crate::networking::interface::DevGetClosestPeersFromNetworkResponse;
+#[cfg(feature = "developer")]
+use crate::networking::interface::DevGetClosestPeersWithMajorityFromNodeResponse;
 use crate::networking::utils::get_quorum_amount;
 use ant_evm::{PaymentQuote, merkle_payments::MerklePaymentCandidateNode};
 use ant_protocol::{NetworkAddress, PrettyPrintRecordKey};
@@ -64,6 +66,9 @@ pub(crate) struct TaskHandler {
     #[cfg(feature = "developer")]
     dev_get_closest_peers_from_network:
         HashMap<OutboundRequestId, OneShotTaskResult<DevGetClosestPeersFromNetworkResponse>>,
+    #[cfg(feature = "developer")]
+    dev_get_closest_peers_with_majority_from_node:
+        HashMap<OutboundRequestId, OneShotTaskResult<DevGetClosestPeersWithMajorityFromNodeResponse>>,
 }
 
 impl TaskHandler {
@@ -82,6 +87,8 @@ impl TaskHandler {
             get_merkle_candidate_quote: Default::default(),
             #[cfg(feature = "developer")]
             dev_get_closest_peers_from_network: Default::default(),
+            #[cfg(feature = "developer")]
+            dev_get_closest_peers_with_majority_from_node: Default::default(),
         }
     }
 
@@ -100,7 +107,11 @@ impl TaskHandler {
             || self.get_closest_peers_from_peer.contains_key(id)
             || self.get_merkle_candidate_quote.contains_key(id);
         #[cfg(feature = "developer")]
-        let base = base || self.dev_get_closest_peers_from_network.contains_key(id);
+        let base = base
+            || self.dev_get_closest_peers_from_network.contains_key(id)
+            || self
+                .dev_get_closest_peers_with_majority_from_node
+                .contains_key(id);
         base
     }
 
@@ -152,6 +163,10 @@ impl TaskHandler {
             #[cfg(feature = "developer")]
             NetworkTask::DevGetClosestPeersFromNetwork { resp, .. } => {
                 self.dev_get_closest_peers_from_network.insert(id, resp);
+            }
+            #[cfg(feature = "developer")]
+            NetworkTask::DevGetClosestPeersWithMajorityFromNode { resp, .. } => {
+                self.dev_get_closest_peers_with_majority_from_node.insert(id, resp);
             }
             _ => {}
         }
@@ -604,6 +619,31 @@ impl TaskHandler {
         Ok(())
     }
 
+    /// Update the DevGetClosestPeersWithMajorityFromNode task with the response.
+    /// Only available when the `developer` feature is enabled.
+    #[cfg(feature = "developer")]
+    pub fn update_dev_get_closest_peers_with_majority_from_node(
+        &mut self,
+        id: OutboundRequestId,
+        response: DevGetClosestPeersWithMajorityFromNodeResponse,
+    ) -> Result<(), TaskHandlerError> {
+        let responder =
+            self.dev_get_closest_peers_with_majority_from_node
+                .remove(&id)
+                .ok_or(TaskHandlerError::UnknownQuery(format!(
+                    "OutboundRequestId {id:?}"
+                )))?;
+
+        trace!(
+            "OutboundRequestId({id}): got {} closest peers with majority knowledge",
+            response.peers.len()
+        );
+        responder
+            .send(Ok(response))
+            .map_err(|_| TaskHandlerError::NetworkClientDropped(format!("{id:?}")))?;
+        Ok(())
+    }
+
     pub fn terminate_query(
         &mut self,
         id: OutboundRequestId,
@@ -669,12 +709,48 @@ impl TaskHandler {
             responder
                 .send(Err(NetworkError::GetQuoteError(error.to_string())))
                 .map_err(|_| TaskHandlerError::NetworkClientDropped(format!("{id:?}")))?;
+        // Dev get closest peers from network case
+        } else if self.terminate_dev_queries(id, peer, &error)? {
+            // Handled by terminate_dev_queries
         } else {
             trace!(
                 "OutboundRequestId({id}): trying to terminate unknown query, maybe it was already removed"
             );
         }
         Ok(())
+    }
+
+    /// Handle termination of developer queries.
+    /// Returns true if a developer query was found and terminated.
+    #[allow(unused_variables)]
+    fn terminate_dev_queries(
+        &mut self,
+        id: OutboundRequestId,
+        peer: PeerId,
+        error: &libp2p::autonat::OutboundFailure,
+    ) -> Result<bool, TaskHandlerError> {
+        #[cfg(feature = "developer")]
+        {
+            if let Some(responder) = self.dev_get_closest_peers_from_network.remove(&id) {
+                trace!(
+                    "OutboundRequestId({id}): dev get closest peers from network got fatal error from peer {peer:?}: {error:?}"
+                );
+                responder
+                    .send(Err(NetworkError::GetClosestPeersError(error.to_string())))
+                    .map_err(|_| TaskHandlerError::NetworkClientDropped(format!("{id:?}")))?;
+                return Ok(true);
+            }
+            if let Some(responder) = self.dev_get_closest_peers_with_majority_from_node.remove(&id) {
+                trace!(
+                    "OutboundRequestId({id}): dev get closest peers with majority from node got fatal error from peer {peer:?}: {error:?}"
+                );
+                responder
+                    .send(Err(NetworkError::GetClosestPeersError(error.to_string())))
+                    .map_err(|_| TaskHandlerError::NetworkClientDropped(format!("{id:?}")))?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Helper function to take the responder and holders from a get record task

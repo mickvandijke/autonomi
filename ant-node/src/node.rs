@@ -874,6 +874,21 @@ impl Node {
                 );
                 Self::respond_dev_get_closest_peers_from_network(network, key, num_of_peers).await
             }
+            #[cfg(feature = "developer")]
+            Query::DevGetClosestPeersWithMajorityFromNode {
+                key,
+                num_of_candidates,
+            } => {
+                debug!(
+                    "Got DevGetClosestPeersWithMajorityFromNode targeting {key:?} with {num_of_candidates:?} candidates"
+                );
+                Self::respond_dev_get_closest_peers_with_majority_from_node(
+                    network,
+                    key,
+                    num_of_candidates,
+                )
+                .await
+            }
         };
         Response::Query(resp)
     }
@@ -931,9 +946,7 @@ impl Node {
             Ok(peers) => {
                 let mut converted: Vec<(NetworkAddress, Vec<Multiaddr>)> = peers
                     .into_iter()
-                    .map(|(peer_id, addrs)| {
-                        (NetworkAddress::from(peer_id), addrs.0)
-                    })
+                    .map(|(peer_id, addrs)| (NetworkAddress::from(peer_id), addrs.0))
                     .collect();
 
                 // If num_of_peers is specified, limit the results
@@ -957,6 +970,52 @@ impl Node {
         };
 
         QueryResponse::DevGetClosestPeersFromNetwork {
+            target,
+            queried_node,
+            peers,
+        }
+    }
+
+    /// Handle DevGetClosestPeersWithMajorityFromNode query.
+    /// Uses the same majority knowledge algorithm as merkle payment verification.
+    /// Only available when the `developer` feature is enabled.
+    #[cfg(feature = "developer")]
+    async fn respond_dev_get_closest_peers_with_majority_from_node(
+        network: &Network,
+        target: NetworkAddress,
+        num_of_candidates: Option<usize>,
+    ) -> QueryResponse {
+        use ant_protocol::messages::QueryResponse;
+
+        let queried_node = NetworkAddress::from(network.peer_id());
+        debug!(
+            "DevGetClosestPeersWithMajorityFromNode: node {queried_node:?} getting majority knowledge for {target:?}"
+        );
+
+        let peers = match network
+            .get_closest_peers_with_majority_knowledge(&target, num_of_candidates)
+            .await
+        {
+            Ok(peers) => {
+                let converted: Vec<(NetworkAddress, Vec<Multiaddr>)> = peers
+                    .into_iter()
+                    .map(|(peer_id, addrs)| (NetworkAddress::from(peer_id), addrs.0))
+                    .collect();
+                debug!(
+                    "DevGetClosestPeersWithMajorityFromNode: found {} peers with majority consensus",
+                    converted.len()
+                );
+                converted
+            }
+            Err(err) => {
+                warn!(
+                    "DevGetClosestPeersWithMajorityFromNode: failed to get majority knowledge for {target:?}: {err:?}"
+                );
+                vec![]
+            }
+        };
+
+        QueryResponse::DevGetClosestPeersWithMajorityFromNode {
             target,
             queried_node,
             peers,

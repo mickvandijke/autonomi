@@ -30,6 +30,11 @@ pub type PoolHash = [u8; 32];
 /// Number of candidate nodes per pool (provides redundancy)
 pub const CANDIDATES_PER_POOL: usize = 16;
 
+/// Number of peers to query when building a candidate pool.
+/// We query 25% more peers than needed to provide fault tolerance against
+/// unresponsive or malicious nodes. The closest successful responses are selected.
+pub const PEERS_TO_QUERY: usize = CANDIDATES_PER_POOL + (CANDIDATES_PER_POOL / 4);
+
 /// Maximum supported Merkle tree depth
 pub const MAX_MERKLE_DEPTH: u8 = 8;
 

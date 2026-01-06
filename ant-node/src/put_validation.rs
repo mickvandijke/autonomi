@@ -12,7 +12,7 @@ use crate::error::PutValidationError;
 use crate::{Marker, Result, node::Node};
 use ant_evm::ProofOfPayment;
 use ant_evm::merkle_payment_vault::get_merkle_payment_info;
-use ant_evm::merkle_payments::CANDIDATES_PER_POOL;
+use ant_evm::merkle_payments::PEERS_TO_QUERY;
 use ant_evm::merkle_payments::MerklePaymentProof;
 use ant_evm::payment_vault::verify_data_payment;
 use ant_protocol::storage::GraphEntry;
@@ -30,9 +30,6 @@ use xor_name::XorName;
 
 // We retry the payment verification once after waiting this many seconds to rule out the possibility of an EVM node state desync
 const RETRY_PAYMENT_VERIFICATION_WAIT_TIME_SECS: u64 = 5;
-
-// Number of peers to query for topology verification in Merkle payments
-const PEERS_TO_QUERY: usize = CANDIDATES_PER_POOL + (CANDIDATES_PER_POOL / 4);
 
 impl Node {
     /// Validate a record and its payment, and store the record to the RecordStore
@@ -1246,7 +1243,10 @@ impl Node {
         // Get closest peers using weighted majority knowledge with the same count as client
         let closest_peers = match self
             .network()
-            .get_closest_peers_with_retries(&reward_pool_address, Some(PEERS_TO_QUERY))
+            .get_closest_peers_with_majority_knowledge_with_retries(
+                &reward_pool_address,
+                Some(PEERS_TO_QUERY),
+            )
             .await
         {
             Ok(peers) => peers,

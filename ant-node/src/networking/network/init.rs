@@ -60,6 +60,12 @@ use std::{
 use tokio::sync::mpsc;
 
 // Timeout for requests sent/received through the request_response behaviour.
+/// Default request timeout for request-response protocol.
+/// When developer feature is enabled, use a longer timeout to allow
+/// developer queries (which trigger network operations) to complete.
+#[cfg(feature = "developer")]
+const REQUEST_TIMEOUT_DEFAULT_S: Duration = Duration::from_secs(180);
+#[cfg(not(feature = "developer"))]
 const REQUEST_TIMEOUT_DEFAULT_S: Duration = Duration::from_secs(30);
 // Sets the keep-alive timeout of idle connections.
 const CONNECTION_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(10);

@@ -12,6 +12,7 @@ use ant_evm::{
     merkle_payments::{
         CANDIDATES_PER_POOL, MAX_LEAVES, MerklePaymentCandidateNode, MerklePaymentCandidatePool,
         MerklePaymentProof, MerklePaymentVerificationError, MerkleTree, MidpointProof,
+        PEERS_TO_QUERY,
     },
 };
 use ant_protocol::{
@@ -108,10 +109,6 @@ impl Client {
         data_size: usize,
         merkle_payment_timestamp: u64,
     ) -> Result<[MerklePaymentCandidateNode; CANDIDATES_PER_POOL], MerklePaymentError> {
-        // Request from 25% more peers than needed to provide fault tolerance
-        // This allows up to 25% of peers to fail without blocking the payment
-        const PEERS_TO_QUERY: usize = CANDIDATES_PER_POOL + (CANDIDATES_PER_POOL / 4);
-
         let network_addr = NetworkAddress::ChunkAddress(ChunkAddress::new(target_address));
         let closest_peers = self
             .network

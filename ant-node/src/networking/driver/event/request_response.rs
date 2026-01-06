@@ -83,6 +83,10 @@ impl SwarmDriver {
                             ant_protocol::messages::Query::DevGetClosestPeersFromNetwork {
                                 ..
                             } => "Request::Query::DevGetClosestPeersFromNetwork",
+                            #[cfg(feature = "developer")]
+                            ant_protocol::messages::Query::DevGetClosestPeersWithMajorityFromNode {
+                                ..
+                            } => "Request::Query::DevGetClosestPeersWithMajorityFromNode",
                         },
                     };
                     connection_action_logging(
@@ -225,6 +229,10 @@ impl SwarmDriver {
                             ant_protocol::messages::QueryResponse::DevGetClosestPeersFromNetwork {
                                 ..
                             } => "Response::Query::DevGetClosestPeersFromNetwork".to_string(),
+                            #[cfg(feature = "developer")]
+                            ant_protocol::messages::QueryResponse::DevGetClosestPeersWithMajorityFromNode {
+                                ..
+                            } => "Response::Query::DevGetClosestPeersWithMajorityFromNode".to_string(),
                         },
                     };
                     connection_action_logging(
