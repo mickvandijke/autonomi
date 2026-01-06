@@ -1246,7 +1246,10 @@ impl Node {
         // Get closest peers using weighted majority knowledge with the same count as client
         let closest_peers = match self
             .network()
-            .get_closest_peers_with_retries(&reward_pool_address, Some(PEERS_TO_QUERY))
+            .get_closest_peers_with_majority_knowledge_with_retries(
+                &reward_pool_address,
+                Some(PEERS_TO_QUERY),
+            )
             .await
         {
             Ok(peers) => peers,

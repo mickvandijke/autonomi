@@ -114,6 +114,23 @@ pub enum QueryResponse {
         /// Closest peers from the network query, with their multiaddresses.
         peers: Vec<(NetworkAddress, Vec<Multiaddr>)>,
     },
+    // ===== DevGetClosestPeersWithMajorityFromNode =====
+    //
+    /// Response to [`DevGetClosestPeersWithMajorityFromNode`]
+    /// Returns closest peers determined by majority consensus from multiple node queries.
+    /// Uses the same majority knowledge algorithm as merkle payment verification.
+    /// Only available when the `developer` feature is enabled.
+    ///
+    /// [`DevGetClosestPeersWithMajorityFromNode`]: crate::messages::Query::DevGetClosestPeersWithMajorityFromNode
+    #[cfg(feature = "developer")]
+    DevGetClosestPeersWithMajorityFromNode {
+        /// The target address that the original request is about.
+        target: NetworkAddress,
+        /// The node that performed the majority knowledge aggregation.
+        queried_node: NetworkAddress,
+        /// Closest peers with majority consensus, sorted by distance.
+        peers: Vec<(NetworkAddress, Vec<Multiaddr>)>,
+    },
 }
 
 // Debug implementation for QueryResponse, to avoid printing Vec<u8>
@@ -201,6 +218,19 @@ impl Debug for QueryResponse {
                 write!(
                     f,
                     "DevGetClosestPeersFromNetwork target {target:?} from {queried_node:?} found {} close peers {addresses:?}",
+                    peers.len()
+                )
+            }
+            #[cfg(feature = "developer")]
+            QueryResponse::DevGetClosestPeersWithMajorityFromNode {
+                target,
+                queried_node,
+                peers,
+            } => {
+                let addresses: Vec<_> = peers.iter().map(|(addr, _)| addr.clone()).collect();
+                write!(
+                    f,
+                    "DevGetClosestPeersWithMajorityFromNode target {target:?} from {queried_node:?} found {} majority peers {addresses:?}",
                     peers.len()
                 )
             }

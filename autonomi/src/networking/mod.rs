@@ -24,13 +24,15 @@ pub(crate) use utils::multiaddr_is_global;
 pub use ant_evm::PaymentQuote;
 pub use ant_protocol::NetworkAddress;
 pub use config::{RetryStrategy, Strategy};
+#[cfg(feature = "developer")]
+pub use interface::DevGetClosestPeersFromNetworkResponse;
+#[cfg(feature = "developer")]
+pub use interface::DevGetClosestPeersWithMajorityFromNodeResponse;
 pub use libp2p::kad::PeerInfo;
 pub use libp2p::{
     Multiaddr, PeerId,
     kad::{Quorum, Record},
 };
-#[cfg(feature = "developer")]
-pub use interface::DevGetClosestPeersFromNetworkResponse;
 
 // internal needs
 use crate::networking::version::PackageVersion;
@@ -927,6 +929,46 @@ impl Network {
             addr: target,
             peer: node,
             num_of_peers,
+            resp: tx,
+        };
+        self.task_sender
+            .send(task)
+            .await
+            .map_err(|_| NetworkError::NetworkDriverOffline)?;
+        rx.await?
+    }
+
+    /// Developer analytics: Get closest peers using majority knowledge.
+    ///
+    /// Asks the target node to query multiple peers and aggregate their views
+    /// to build consensus on who the closest peers are.
+    ///
+    /// # Arguments
+    /// * `node` - The node to ask (will build majority knowledge)
+    /// * `target` - The target address to find closest peers for
+    /// * `num_of_candidates` - Optional number of candidates to return (defaults to 16)
+    ///
+    /// # Returns
+    /// * `DevGetClosestPeersWithMajorityFromNodeResponse` containing:
+    ///   - The target address
+    ///   - The queried node's address
+    ///   - Number of nodes queried and majority threshold
+    ///   - Peers with majority consensus sorted by distance
+    ///
+    /// # Feature
+    /// Only available when the `developer` feature is enabled.
+    #[cfg(feature = "developer")]
+    pub async fn dev_get_closest_peers_with_majority_from_node(
+        &self,
+        node: PeerInfo,
+        target: NetworkAddress,
+        num_of_candidates: Option<usize>,
+    ) -> Result<interface::DevGetClosestPeersWithMajorityFromNodeResponse, NetworkError> {
+        let (tx, rx) = oneshot::channel();
+        let task = NetworkTask::DevGetClosestPeersWithMajorityFromNode {
+            addr: target,
+            peer: node,
+            num_of_candidates,
             resp: tx,
         };
         self.task_sender

@@ -417,6 +417,36 @@ impl Client {
             .dev_get_closest_peers_from_node(node, target, num_of_peers)
             .await
     }
+
+    /// Developer analytics: Get closest peers using majority knowledge.
+    ///
+    /// Asks the target node to query multiple peers and aggregate their views
+    /// to build consensus on who the closest peers are.
+    ///
+    /// # Arguments
+    /// * `node` - The node to ask (will build majority knowledge)
+    /// * `target` - The target address to find closest peers for
+    /// * `num_of_candidates` - Optional number of candidates to return (defaults to 16)
+    ///
+    /// # Returns
+    /// * `DevGetClosestPeersWithMajorityFromNodeResponse` containing:
+    ///   - The target address
+    ///   - The queried node's address
+    ///   - Number of nodes queried and majority threshold
+    ///   - Peers with majority consensus sorted by distance
+    pub async fn dev_get_closest_peers_with_majority_from_node(
+        &self,
+        node: libp2p::kad::PeerInfo,
+        target: ant_protocol::NetworkAddress,
+        num_of_candidates: Option<usize>,
+    ) -> Result<
+        crate::networking::DevGetClosestPeersWithMajorityFromNodeResponse,
+        crate::networking::NetworkError,
+    > {
+        self.network
+            .dev_get_closest_peers_with_majority_from_node(node, target, num_of_candidates)
+            .await
+    }
 }
 
 #[cfg(test)]

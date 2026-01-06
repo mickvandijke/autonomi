@@ -556,6 +556,32 @@ impl NetworkDriver {
                     },
                 );
             }
+            #[cfg(feature = "developer")]
+            NetworkTask::DevGetClosestPeersWithMajorityFromNode {
+                addr,
+                peer,
+                num_of_candidates,
+                resp,
+            } => {
+                let req = Request::Query(Query::DevGetClosestPeersWithMajorityFromNode {
+                    key: addr.clone(),
+                    num_of_candidates,
+                });
+
+                let req_id =
+                    self.req()
+                        .send_request_with_addresses(&peer.peer_id, req, peer.addrs.clone());
+
+                self.pending_tasks.insert_query(
+                    req_id,
+                    NetworkTask::DevGetClosestPeersWithMajorityFromNode {
+                        addr,
+                        peer,
+                        num_of_candidates,
+                        resp,
+                    },
+                );
+            }
         }
     }
 }

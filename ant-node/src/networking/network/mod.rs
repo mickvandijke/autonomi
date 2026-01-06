@@ -665,7 +665,7 @@ impl Network {
     ///
     /// This is the recommended function for Merkle payment topology verification
     /// to handle transient network failures.
-    pub(crate) async fn get_closest_peers_with_retries(
+    pub(crate) async fn get_closest_peers_with_majority_knowledge_with_retries(
         &self,
         key: &NetworkAddress,
         n: Option<usize>,

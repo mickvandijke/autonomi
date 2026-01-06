@@ -15,11 +15,17 @@
 use crate::actions::{NetworkContext, connect_to_network};
 use ant_protocol::NetworkAddress;
 use autonomi::Client;
+use autonomi::PublicKey;
 use autonomi::client::data_types::chunk::ChunkAddress;
 use autonomi::client::data_types::graph::GraphEntryAddress;
-use autonomi::PublicKey;
-use autonomi::networking::{Multiaddr, PeerId, PeerInfo};
+use autonomi::networking::{
+    DevGetClosestPeersWithMajorityFromNodeResponse, Multiaddr, PeerId, PeerInfo,
+};
 use color_eyre::{Result, eyre::eyre};
+
+/// Merkle payment candidate pool parameters (mirrors autonomi client behavior)
+const MERKLE_CANDIDATES_PER_POOL: usize = 16;
+const MERKLE_PEERS_TO_QUERY: usize = MERKLE_CANDIDATES_PER_POOL + (MERKLE_CANDIDATES_PER_POOL / 4); // 20
 
 /// Query a specific node to get its network view of closest peers to a target address.
 ///
@@ -70,6 +76,32 @@ pub async fn closest_peers(
     }
 
     Ok(())
+}
+
+/// Compare merkle payment candidates between client and node perspectives.
+///
+/// This command simulates the complete merkle candidate selection and verification flow,
+/// comparing what the client would select vs what the node's majority knowledge determines.
+pub async fn merkle_candidates(
+    node_addr: &str,
+    target: &str,
+    network_context: NetworkContext,
+) -> Result<()> {
+    // Parse the target address (hex string)
+    let target_addr = parse_target_address(target)?;
+
+    println!("Connecting to network...");
+    let client = connect_to_network(network_context)
+        .await
+        .map_err(|(err, _exit_code)| err)?;
+
+    // Try to resolve the node - either from multiaddr or by discovering PeerId
+    let node_info = resolve_node(&client, node_addr).await?;
+
+    println!("Running merkle candidate comparison for {target}...");
+    println!();
+
+    run_merkle_simulation(&client, &target_addr, target, node_info).await
 }
 
 /// Display results for the standard (non-comparison) mode.
@@ -146,9 +178,18 @@ fn display_comparison(
 
     let client_peer_ids: HashSet<PeerId> = client_peers.iter().map(|p| p.peer_id).collect();
 
-    let common: HashSet<PeerId> = node_peer_ids.intersection(&client_peer_ids).copied().collect();
-    let node_only: HashSet<PeerId> = node_peer_ids.difference(&client_peer_ids).copied().collect();
-    let client_only: HashSet<PeerId> = client_peer_ids.difference(&node_peer_ids).copied().collect();
+    let common: HashSet<PeerId> = node_peer_ids
+        .intersection(&client_peer_ids)
+        .copied()
+        .collect();
+    let node_only: HashSet<PeerId> = node_peer_ids
+        .difference(&client_peer_ids)
+        .copied()
+        .collect();
+    let client_only: HashSet<PeerId> = client_peer_ids
+        .difference(&node_peer_ids)
+        .copied()
+        .collect();
 
     println!("Comparison of closest peers to {target}");
     println!("{}", "=".repeat(100));
@@ -167,14 +208,8 @@ fn display_comparison(
     println!();
 
     // Node's perspective
-    println!(
-        "NODE'S PERSPECTIVE (from {}):",
-        node_response.queried_node
-    );
-    println!(
-        "  {:<4} {:<54} {:<10} Status",
-        "#", "PeerId", "Distance"
-    );
+    println!("NODE'S PERSPECTIVE (from {}):", node_response.queried_node);
+    println!("  {:<4} {:<54} {:<10} Status", "#", "PeerId", "Distance");
     println!("  {}", "-".repeat(80));
 
     for (i, (peer_addr, _)) in node_response.peers.iter().enumerate() {
@@ -210,10 +245,7 @@ fn display_comparison(
 
     // Client's perspective
     println!("CLIENT'S PERSPECTIVE:");
-    println!(
-        "  {:<4} {:<54} {:<10} Status",
-        "#", "PeerId", "Distance"
-    );
+    println!("  {:<4} {:<54} {:<10} Status", "#", "PeerId", "Distance");
     println!("  {}", "-".repeat(85));
 
     // Sort client peers by distance
@@ -273,6 +305,252 @@ fn display_comparison(
             } else {
                 println!("  {peer_id} (distance: {distance_ilog2})");
             }
+        }
+    }
+}
+
+/// Run full merkle payment simulation with majority knowledge verification.
+///
+/// This compares:
+/// 1. Client side: Query closest peers to target, select top 16 as candidates
+/// 2. Node side: Ask the node to build majority knowledge by querying its peers
+/// 3. Compare client's candidates against the node's majority knowledge view
+async fn run_merkle_simulation(
+    client: &Client,
+    target_addr: &NetworkAddress,
+    target: &str,
+    verifying_node: PeerInfo,
+) -> Result<()> {
+    use std::collections::HashSet;
+
+    let verifying_peer_id = verifying_node.peer_id;
+
+    println!("MERKLE PAYMENT SIMULATION for {target}");
+    println!("{}", "=".repeat(100));
+    println!();
+    println!(
+        "Parameters: PEERS_TO_QUERY={MERKLE_PEERS_TO_QUERY}, CANDIDATES_PER_POOL={MERKLE_CANDIDATES_PER_POOL}"
+    );
+    println!();
+
+    // ========================================================================
+    // PHASE 1: Client-side candidate selection simulation
+    // ========================================================================
+    println!("PHASE 1: CLIENT CANDIDATE SELECTION");
+    println!("{}", "-".repeat(50));
+    println!();
+
+    println!("  Querying closest peers from client's perspective...");
+    let client_peers = client
+        .network()
+        .get_closest_peers(target_addr.clone(), Some(MERKLE_PEERS_TO_QUERY))
+        .await
+        .map_err(|e| eyre!("Failed to get client's closest peers: {e}"))?;
+
+    // Sort by distance and select top CANDIDATES_PER_POOL
+    let mut client_peers_sorted: Vec<_> = client_peers.iter().collect();
+    client_peers_sorted.sort_by_key(|p| {
+        let addr = NetworkAddress::from(p.peer_id);
+        target_addr.distance(&addr)
+    });
+
+    let client_candidates: Vec<PeerId> = client_peers_sorted
+        .iter()
+        .take(MERKLE_CANDIDATES_PER_POOL)
+        .map(|p| p.peer_id)
+        .collect();
+
+    println!(
+        "  Queried {} peers, selected {} candidates",
+        client_peers.len(),
+        client_candidates.len()
+    );
+    println!();
+
+    // ========================================================================
+    // PHASE 2: Node-side majority knowledge (via RPC)
+    // ========================================================================
+    println!("PHASE 2: NODE MAJORITY KNOWLEDGE VERIFICATION (via RPC)");
+    println!("{}", "-".repeat(50));
+    println!();
+    println!("  Asking node {verifying_peer_id} to build majority knowledge");
+    println!("  by querying its peers and aggregating their views.");
+    println!();
+
+    let majority_response = client
+        .dev_get_closest_peers_with_majority_from_node(
+            verifying_node,
+            target_addr.clone(),
+            Some(MERKLE_CANDIDATES_PER_POOL),
+        )
+        .await
+        .map_err(|e| eyre!("Failed to get majority knowledge from node: {e}"))?;
+
+    println!(
+        "  Found {} peers with majority consensus",
+        majority_response.peers.len()
+    );
+    println!();
+
+    // ========================================================================
+    // PHASE 3: Verification comparison
+    // ========================================================================
+    println!("PHASE 3: VERIFICATION COMPARISON");
+    println!("{}", "-".repeat(50));
+    println!();
+
+    let client_set: HashSet<PeerId> = client_candidates.iter().copied().collect();
+    let majority_candidates: Vec<PeerId> = majority_response
+        .peers
+        .iter()
+        .filter_map(|(addr, _)| addr.as_peer_id())
+        .collect();
+    let majority_set: HashSet<PeerId> = majority_candidates.iter().copied().collect();
+
+    let validated: HashSet<PeerId> = client_set.intersection(&majority_set).copied().collect();
+    let client_only: HashSet<PeerId> = client_set.difference(&majority_set).copied().collect();
+    let majority_only: HashSet<PeerId> = majority_set.difference(&client_set).copied().collect();
+
+    let validation_rate = if !client_set.is_empty() {
+        (validated.len() as f64 / client_set.len() as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    println!("SUMMARY:");
+    println!("  Client candidates:     {}", client_candidates.len());
+    println!("  Majority candidates:   {}", majority_candidates.len());
+    println!("  Validated (in both):   {}", validated.len());
+    println!("  Client-only:           {}", client_only.len());
+    println!("  Majority-only:         {}", majority_only.len());
+    println!("  Validation rate:       {validation_rate:.1}%");
+    println!();
+
+    // Verification result
+    if validation_rate >= 75.0 {
+        println!("  PASS - Node would likely accept this payment");
+        println!("    Majority of client's candidates are validated by network consensus");
+    } else if validation_rate >= 50.0 {
+        println!("  MARGINAL - Payment verification uncertain");
+        println!("    Some candidates may not be recognized by the verifying node");
+    } else {
+        println!("  FAIL - Node would likely reject this payment");
+        println!("    Too few candidates match the node's majority knowledge view");
+    }
+    println!();
+
+    // ========================================================================
+    // Detailed breakdown
+    // ========================================================================
+    display_merkle_details(
+        target_addr,
+        &client_candidates,
+        &majority_response,
+        &validated,
+        &client_only,
+        &majority_only,
+        &client_peers_sorted,
+    );
+
+    Ok(())
+}
+
+/// Display detailed breakdown of merkle simulation results.
+fn display_merkle_details(
+    target_addr: &NetworkAddress,
+    client_candidates: &[PeerId],
+    majority_response: &DevGetClosestPeersWithMajorityFromNodeResponse,
+    validated: &std::collections::HashSet<PeerId>,
+    client_only: &std::collections::HashSet<PeerId>,
+    majority_only: &std::collections::HashSet<PeerId>,
+    client_peers_sorted: &[&PeerInfo],
+) {
+    println!("CLIENT'S SELECTED CANDIDATES:");
+    println!(
+        "  {:<4} {:<54} {:<10} Status",
+        "#", "PeerId", "Distance"
+    );
+    println!("  {}", "-".repeat(80));
+
+    for (i, peer_id) in client_candidates.iter().enumerate() {
+        let peer_addr = NetworkAddress::from(*peer_id);
+        let distance = target_addr.distance(&peer_addr);
+        let distance_ilog2 = distance.ilog2().unwrap_or(0);
+
+        let status = if validated.contains(peer_id) {
+            "validated"
+        } else {
+            "not in majority"
+        };
+
+        println!(
+            "  {:<4} {:<54} {:<10} {}",
+            i + 1,
+            peer_id,
+            distance_ilog2,
+            status
+        );
+    }
+    println!();
+
+    println!("NODE'S MAJORITY KNOWLEDGE CANDIDATES:");
+    println!(
+        "  {:<4} {:<54} {:<10} Status",
+        "#", "PeerId", "Distance"
+    );
+    println!("  {}", "-".repeat(80));
+
+    for (i, (peer_addr, _)) in majority_response.peers.iter().enumerate() {
+        let distance = target_addr.distance(peer_addr);
+        let distance_ilog2 = distance.ilog2().unwrap_or(0);
+
+        let peer_display = if let Some(peer_id) = peer_addr.as_peer_id() {
+            let status = if validated.contains(&peer_id) {
+                "common"
+            } else {
+                "majority-only"
+            };
+            (peer_id.to_string(), status)
+        } else {
+            (peer_addr.to_string(), "unknown")
+        };
+
+        println!(
+            "  {:<4} {:<54} {:<10} {}",
+            i + 1,
+            peer_display.0,
+            distance_ilog2,
+            peer_display.1
+        );
+    }
+    println!();
+
+    // Show peers that didn't make majority
+    if !client_only.is_empty() {
+        println!("CANDIDATES ONLY IN CLIENT'S POOL (not validated):");
+        for peer_id in client_only {
+            let peer_addr = NetworkAddress::from(*peer_id);
+            let distance = target_addr.distance(&peer_addr);
+            let distance_ilog2 = distance.ilog2().unwrap_or(0);
+            println!("  {peer_id} (dist: {distance_ilog2}) - not in node's majority knowledge");
+        }
+        println!();
+    }
+
+    if !majority_only.is_empty() {
+        println!("CANDIDATES ONLY IN MAJORITY KNOWLEDGE (client missed):");
+        for peer_id in majority_only {
+            let peer_addr = NetworkAddress::from(*peer_id);
+            let distance = target_addr.distance(&peer_addr);
+            let distance_ilog2 = distance.ilog2().unwrap_or(0);
+
+            let in_client_query = client_peers_sorted.iter().any(|p| p.peer_id == *peer_id);
+            let reason = if in_client_query {
+                "in client's query but not selected (farther than others)"
+            } else {
+                "not in client's initial query"
+            };
+            println!("  {peer_id} (dist: {distance_ilog2}) - {reason}");
         }
     }
 }
