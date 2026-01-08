@@ -527,69 +527,91 @@ pub async fn verify_version(
         async move {
             let peer_id = node_info.peer_id;
 
-            // Wrap the entire test in a timeout
-            let test_result = tokio::time::timeout(NODE_TEST_TIMEOUT, async {
-                // Step 1: Get reported version
-                let reported_version = match client.get_node_version(node_info.clone()).await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        return TestResult::Failed {
-                            peer_id,
-                            error: format!("Failed to get version: {e}"),
-                        };
-                    }
-                };
-
-                // Step 2: Send Merkle payment with real proof and analyze error
-                let actual_version_indicator =
-                    match test_node_with_merkle_proof(&client, &node_info, &test_proof, &test_chunk)
-                        .await
-                    {
-                        Ok(indicator) => indicator,
-                        Err(e) => {
-                            return TestResult::Failed {
-                                peer_id,
-                                error: format!("Failed to test: {e}"),
-                            };
-                        }
-                    };
-
-                TestResult::Success {
-                    peer_id,
-                    reported_version,
-                    actual_version_indicator,
-                }
-            })
+            // Step 1: Get reported version (with timeout)
+            let version_result = tokio::time::timeout(
+                NODE_TEST_TIMEOUT,
+                client.get_node_version(node_info.clone()),
+            )
             .await;
 
-            match test_result {
-                Ok(result) => result,
-                Err(_) => TestResult::Failed {
-                    peer_id,
-                    error: "Timeout".to_string(),
-                },
+            let reported_version = match version_result {
+                Ok(Ok(v)) => v,
+                Ok(Err(e)) => {
+                    return TestResult::Failed {
+                        peer_id,
+                        reported_version: None,
+                        error: format!("Failed to get version: {e}"),
+                    };
+                }
+                Err(_) => {
+                    return TestResult::Failed {
+                        peer_id,
+                        reported_version: None,
+                        error: "Timeout getting version".to_string(),
+                    };
+                }
+            };
+
+            // Step 2: Send Merkle payment with real proof and analyze error (with timeout)
+            let test_result = tokio::time::timeout(
+                NODE_TEST_TIMEOUT,
+                test_node_with_merkle_proof(&client, &node_info, &test_proof, &test_chunk),
+            )
+            .await;
+
+            let actual_version_indicator = match test_result {
+                Ok(Ok(indicator)) => indicator,
+                Ok(Err(e)) => {
+                    return TestResult::Failed {
+                        peer_id,
+                        reported_version: Some(reported_version),
+                        error: format!("Failed to test: {e}"),
+                    };
+                }
+                Err(_) => {
+                    return TestResult::Failed {
+                        peer_id,
+                        reported_version: Some(reported_version),
+                        error: "Timeout testing node".to_string(),
+                    };
+                }
+            };
+
+            TestResult::Success {
+                peer_id,
+                reported_version,
+                actual_version_indicator,
             }
         }
     });
 
     let test_results: Vec<TestResult> = futures::future::join_all(test_futures).await;
 
-    // Error message changed at 2025.12.2.1
-    // If a node has "majority knowledge" error but reports >= 2025.12.2.1, it's lying
-    let lying_threshold =
-        autonomi::networking::version::PackageVersion::new(2025, 12, 2, 1);
-
     // Process and display results
-    let mut old_nodes_lying = Vec::new(); // Old nodes reporting >= 2025.12.2.1
-    let mut old_nodes_honest = Vec::new(); // Old nodes reporting < 2025.12.2.1
-    let mut unconfirmed_nodes = Vec::new();
-    let mut failed_nodes = Vec::new();
+    // Group nodes by their reported version for each category
+    let mut old_error_by_version: std::collections::HashMap<String, Vec<PeerId>> =
+        std::collections::HashMap::new();
+    let mut unconfirmed_by_version: std::collections::HashMap<String, Vec<PeerId>> =
+        std::collections::HashMap::new();
+    let mut timeout_by_version: std::collections::HashMap<String, Vec<PeerId>> =
+        std::collections::HashMap::new();
 
     for result in test_results {
         match result {
-            TestResult::Failed { peer_id, error } => {
-                println!("{peer_id}: FAILED - {error}");
-                failed_nodes.push((peer_id, error));
+            TestResult::Failed {
+                peer_id,
+                reported_version,
+                error,
+            } => {
+                let version_str = reported_version
+                    .as_ref()
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                println!("{peer_id}: CLIENT TIMEOUT ({error}) (reported: {version_str})");
+                timeout_by_version
+                    .entry(version_str)
+                    .or_default()
+                    .push(peer_id);
             }
             TestResult::Success {
                 peer_id,
@@ -598,19 +620,18 @@ pub async fn verify_version(
             } => {
                 match actual_version_indicator {
                     VersionIndicator::Old => {
-                        // Lying if reported version >= 2025.12.2.1
-                        let is_lying = reported_version.is_minimum(&lying_threshold);
-                        if is_lying {
-                            println!("{peer_id}: OLD (reported: {reported_version}) <- LYING");
-                            old_nodes_lying.push((peer_id, reported_version));
-                        } else {
-                            println!("{peer_id}: OLD (reported: {reported_version})");
-                            old_nodes_honest.push((peer_id, reported_version));
-                        }
+                        println!("{peer_id}: OLD ERROR (reported: {reported_version})");
+                        old_error_by_version
+                            .entry(reported_version.to_string())
+                            .or_default()
+                            .push(peer_id);
                     }
                     VersionIndicator::Unconfirmed => {
                         println!("{peer_id}: UNCONFIRMED (reported: {reported_version})");
-                        unconfirmed_nodes.push((peer_id, reported_version));
+                        unconfirmed_by_version
+                            .entry(reported_version.to_string())
+                            .or_default()
+                            .push(peer_id);
                     }
                 }
             }
@@ -623,40 +644,59 @@ pub async fn verify_version(
     println!("SUMMARY");
     println!("{}", "=".repeat(80));
 
-    let total_tested =
-        old_nodes_lying.len() + old_nodes_honest.len() + unconfirmed_nodes.len() + failed_nodes.len();
+    let old_error_count: usize = old_error_by_version.values().map(|v| v.len()).sum();
+    let unconfirmed_count: usize = unconfirmed_by_version.values().map(|v| v.len()).sum();
+    let timeout_count: usize = timeout_by_version.values().map(|v| v.len()).sum();
+    let total_tested = old_error_count + unconfirmed_count + timeout_count;
 
     if total_tested == 0 {
         println!("No nodes were tested.");
         return Ok(());
     }
 
-    let old_count = old_nodes_lying.len() + old_nodes_honest.len();
-    let old_percentage = (old_count as f64 / total_tested as f64) * 100.0;
-    let lying_percentage = (old_nodes_lying.len() as f64 / total_tested as f64) * 100.0;
-    let honest_old_percentage = (old_nodes_honest.len() as f64 / total_tested as f64) * 100.0;
+    let old_percentage = (old_error_count as f64 / total_tested as f64) * 100.0;
+    let unconfirmed_percentage = (unconfirmed_count as f64 / total_tested as f64) * 100.0;
+    let timeout_percentage = (timeout_count as f64 / total_tested as f64) * 100.0;
 
     println!();
-    println!("Total tested:       {total_tested}");
-    println!("Old nodes:          {old_count} ({old_percentage:.1}%)");
-    println!("  - Lying (>=2025.12.2.1):    {} ({lying_percentage:.1}%)", old_nodes_lying.len());
-    println!("  - Honest (<2025.12.2.1):    {} ({honest_old_percentage:.1}%)", old_nodes_honest.len());
-    println!("Unconfirmed:        {} ({:.1}%)", unconfirmed_nodes.len(), (unconfirmed_nodes.len() as f64 / total_tested as f64) * 100.0);
-    println!("Failed:             {} ({:.1}%)", failed_nodes.len(), (failed_nodes.len() as f64 / total_tested as f64) * 100.0);
+    println!("Total tested:              {total_tested}");
     println!();
 
-    if !old_nodes_lying.is_empty() {
-        println!("OLD NODES LYING ABOUT VERSION:");
-        for (peer_id, reported) in &old_nodes_lying {
-            println!("  {peer_id} (reported: {reported})");
+    // Returned old error message
+    println!("Returned old error msg:    {old_error_count} ({old_percentage:.1}%)");
+    if !old_error_by_version.is_empty() {
+        let mut versions: Vec<_> = old_error_by_version.keys().collect();
+        versions.sort();
+        for version in versions {
+            let count = old_error_by_version[version].len();
+            let pct = (count as f64 / total_tested as f64) * 100.0;
+            println!("  - {version}: {count} ({pct:.1}%)");
         }
-        println!();
     }
+    println!();
 
-    if !old_nodes_honest.is_empty() {
-        println!("OLD NODES (HONEST):");
-        for (peer_id, reported) in &old_nodes_honest {
-            println!("  {peer_id} (reported: {reported})");
+    // Unconfirmed
+    println!("Unconfirmed:               {unconfirmed_count} ({unconfirmed_percentage:.1}%)");
+    if !unconfirmed_by_version.is_empty() {
+        let mut versions: Vec<_> = unconfirmed_by_version.keys().collect();
+        versions.sort();
+        for version in versions {
+            let count = unconfirmed_by_version[version].len();
+            let pct = (count as f64 / total_tested as f64) * 100.0;
+            println!("  - {version}: {count} ({pct:.1}%)");
+        }
+    }
+    println!();
+
+    // Client timeout
+    println!("Client timeout:            {timeout_count} ({timeout_percentage:.1}%)");
+    if !timeout_by_version.is_empty() {
+        let mut versions: Vec<_> = timeout_by_version.keys().collect();
+        versions.sort();
+        for version in versions {
+            let count = timeout_by_version[version].len();
+            let pct = (count as f64 / total_tested as f64) * 100.0;
+            println!("  - {version}: {count} ({pct:.1}%)");
         }
     }
 
@@ -778,6 +818,7 @@ enum TestResult {
     },
     Failed {
         peer_id: PeerId,
+        reported_version: Option<autonomi::networking::version::PackageVersion>,
         error: String,
     },
 }
