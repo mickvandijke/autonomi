@@ -13,13 +13,21 @@
 //! feature to be enabled on both the client (ant-cli) and the target node.
 
 use crate::actions::{NetworkContext, connect_to_network};
+use ant_evm::EvmWallet;
+use ant_evm::merkle_payments::MerklePaymentProof;
+use ant_protocol::storage::{Chunk, DataTypes, RecordKind, try_serialize_record};
 use ant_protocol::NetworkAddress;
+use autonomi::Bytes;
 use autonomi::Client;
 use autonomi::client::data_types::chunk::ChunkAddress;
 use autonomi::client::data_types::graph::GraphEntryAddress;
-use autonomi::PublicKey;
+use autonomi::client::merkle_payments::MerklePaymentReceipt;
 use autonomi::networking::{Multiaddr, PeerId, PeerInfo};
+use autonomi::PublicKey;
 use color_eyre::{Result, eyre::eyre};
+use libp2p::kad::Record;
+use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Get the version of a node.
 ///
@@ -417,4 +425,474 @@ fn parse_target_address(target: &str) -> Result<NetworkAddress> {
     Err(eyre!(
         "Invalid target address. Expected ChunkAddress, PublicKey, 32-byte hex, PeerId, or NetworkAddress debug format. Got: {target}"
     ))
+}
+
+/// Verify that nodes are running the version they report.
+///
+/// This command tests nodes by sending a Merkle payment request and analyzing
+/// the error message to determine the actual code version running on the node.
+///
+/// The test exploits the fact that error messages changed between versions:
+/// - Pre-2025.12.2.1: "Failed to get closest peers with majority knowledge to"
+/// - 2025.12.2.1+: "Failed to get closest peers for"
+pub async fn verify_version(
+    node_addrs: Option<&str>,
+    count: usize,
+    proof_file: &str,
+    network_context: NetworkContext,
+) -> Result<()> {
+    // Load the test proof from file
+    println!("Loading test proof from: {proof_file}");
+    let proof_path = Path::new(proof_file);
+    if !proof_path.exists() {
+        return Err(eyre!(
+            "Proof file not found: {proof_file}\n\
+             Create one first using: ant developer create-test-proof"
+        ));
+    }
+
+    let proof_json = std::fs::read_to_string(proof_path)
+        .map_err(|e| eyre!("Failed to read proof file: {e}"))?;
+    let test_data: TestProofData = serde_json::from_str(&proof_json)
+        .map_err(|e| eyre!("Failed to parse proof file: {e}"))?;
+
+    // Parse the chunk address
+    let chunk_addr_bytes = hex::decode(&test_data.chunk_address)
+        .map_err(|e| eyre!("Failed to decode chunk address: {e}"))?;
+    let mut addr_array = [0u8; 32];
+    addr_array.copy_from_slice(&chunk_addr_bytes);
+    let chunk_xorname = xor_name::XorName(addr_array);
+
+    // Get the proof for this chunk
+    let test_proof = test_data
+        .receipt
+        .proofs
+        .get(&chunk_xorname)
+        .ok_or_else(|| eyre!("Proof file doesn't contain proof for the stored chunk address"))?
+        .clone();
+
+    // Recreate the chunk from the stored data
+    let chunk_data_bytes = hex::decode(&test_data.chunk_data)
+        .map_err(|e| eyre!("Failed to decode chunk data: {e}"))?;
+    let test_chunk = Chunk::new(Bytes::from(chunk_data_bytes));
+
+    println!("Loaded proof for chunk: {}", test_data.chunk_address);
+    println!();
+
+    println!("Connecting to network...");
+    let client = connect_to_network(network_context)
+        .await
+        .map_err(|(err, _exit_code)| err)?;
+
+    // Get the list of nodes to test
+    let nodes = if let Some(addrs) = node_addrs {
+        // Parse comma-separated node addresses
+        let mut nodes = Vec::new();
+        for addr_str in addrs.split(',') {
+            let addr_str = addr_str.trim();
+            if addr_str.is_empty() {
+                continue;
+            }
+            match resolve_node(&client, addr_str).await {
+                Ok(node) => nodes.push(node),
+                Err(e) => {
+                    eprintln!("Warning: Failed to resolve {addr_str}: {e}");
+                }
+            }
+        }
+        if nodes.is_empty() {
+            return Err(eyre!(
+                "No valid nodes could be resolved from the provided addresses"
+            ));
+        }
+        nodes
+    } else {
+        // Get random nodes from the network
+        println!("Discovering random nodes from the network...");
+        get_random_nodes(&client, count).await?
+    };
+
+    println!();
+    println!("Testing {} nodes for version consistency...", nodes.len());
+    println!("{}", "=".repeat(80));
+    println!();
+
+    // Test all nodes in parallel with timeout
+    const NODE_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+    let test_futures = nodes.into_iter().map(|node_info| {
+        let client = client.clone();
+        let test_proof = test_proof.clone();
+        let test_chunk = test_chunk.clone();
+        async move {
+            let peer_id = node_info.peer_id;
+
+            // Wrap the entire test in a timeout
+            let test_result = tokio::time::timeout(NODE_TEST_TIMEOUT, async {
+                // Step 1: Get reported version
+                let reported_version = match client.get_node_version(node_info.clone()).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return TestResult::Failed {
+                            peer_id,
+                            error: format!("Failed to get version: {e}"),
+                        };
+                    }
+                };
+
+                // Step 2: Send Merkle payment with real proof and analyze error
+                let actual_version_indicator =
+                    match test_node_with_merkle_proof(&client, &node_info, &test_proof, &test_chunk)
+                        .await
+                    {
+                        Ok(indicator) => indicator,
+                        Err(e) => {
+                            return TestResult::Failed {
+                                peer_id,
+                                error: format!("Failed to test: {e}"),
+                            };
+                        }
+                    };
+
+                TestResult::Success {
+                    peer_id,
+                    reported_version,
+                    actual_version_indicator,
+                }
+            })
+            .await;
+
+            match test_result {
+                Ok(result) => result,
+                Err(_) => TestResult::Failed {
+                    peer_id,
+                    error: "Timeout".to_string(),
+                },
+            }
+        }
+    });
+
+    let test_results: Vec<TestResult> = futures::future::join_all(test_futures).await;
+
+    // Error message changed at 2025.12.2.1
+    // If a node has "majority knowledge" error but reports >= 2025.12.2.1, it's lying
+    let lying_threshold =
+        autonomi::networking::version::PackageVersion::new(2025, 12, 2, 1);
+
+    // Process and display results
+    let mut old_nodes_lying = Vec::new(); // Old nodes reporting >= 2025.12.2.1
+    let mut old_nodes_honest = Vec::new(); // Old nodes reporting < 2025.12.2.1
+    let mut unconfirmed_nodes = Vec::new();
+    let mut failed_nodes = Vec::new();
+
+    for result in test_results {
+        match result {
+            TestResult::Failed { peer_id, error } => {
+                println!("{peer_id}: FAILED - {error}");
+                failed_nodes.push((peer_id, error));
+            }
+            TestResult::Success {
+                peer_id,
+                reported_version,
+                actual_version_indicator,
+            } => {
+                match actual_version_indicator {
+                    VersionIndicator::Old => {
+                        // Lying if reported version >= 2025.12.2.1
+                        let is_lying = reported_version.is_minimum(&lying_threshold);
+                        if is_lying {
+                            println!("{peer_id}: OLD (reported: {reported_version}) <- LYING");
+                            old_nodes_lying.push((peer_id, reported_version));
+                        } else {
+                            println!("{peer_id}: OLD (reported: {reported_version})");
+                            old_nodes_honest.push((peer_id, reported_version));
+                        }
+                    }
+                    VersionIndicator::Unconfirmed => {
+                        println!("{peer_id}: UNCONFIRMED (reported: {reported_version})");
+                        unconfirmed_nodes.push((peer_id, reported_version));
+                    }
+                }
+            }
+        }
+    }
+
+    // Summary
+    println!();
+    println!("{}", "=".repeat(80));
+    println!("SUMMARY");
+    println!("{}", "=".repeat(80));
+
+    let total_tested =
+        old_nodes_lying.len() + old_nodes_honest.len() + unconfirmed_nodes.len() + failed_nodes.len();
+
+    if total_tested == 0 {
+        println!("No nodes were tested.");
+        return Ok(());
+    }
+
+    let old_count = old_nodes_lying.len() + old_nodes_honest.len();
+    let old_percentage = (old_count as f64 / total_tested as f64) * 100.0;
+    let lying_percentage = (old_nodes_lying.len() as f64 / total_tested as f64) * 100.0;
+    let honest_old_percentage = (old_nodes_honest.len() as f64 / total_tested as f64) * 100.0;
+
+    println!();
+    println!("Total tested:       {total_tested}");
+    println!("Old nodes:          {old_count} ({old_percentage:.1}%)");
+    println!("  - Lying (>=2025.12.2.1):    {} ({lying_percentage:.1}%)", old_nodes_lying.len());
+    println!("  - Honest (<2025.12.2.1):    {} ({honest_old_percentage:.1}%)", old_nodes_honest.len());
+    println!("Unconfirmed:        {} ({:.1}%)", unconfirmed_nodes.len(), (unconfirmed_nodes.len() as f64 / total_tested as f64) * 100.0);
+    println!("Failed:             {} ({:.1}%)", failed_nodes.len(), (failed_nodes.len() as f64 / total_tested as f64) * 100.0);
+    println!();
+
+    if !old_nodes_lying.is_empty() {
+        println!("OLD NODES LYING ABOUT VERSION:");
+        for (peer_id, reported) in &old_nodes_lying {
+            println!("  {peer_id} (reported: {reported})");
+        }
+        println!();
+    }
+
+    if !old_nodes_honest.is_empty() {
+        println!("OLD NODES (HONEST):");
+        for (peer_id, reported) in &old_nodes_honest {
+            println!("  {peer_id} (reported: {reported})");
+        }
+    }
+
+    Ok(())
+}
+
+/// Test proof data that includes the chunk needed for testing
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TestProofData {
+    /// The Merkle payment receipt
+    pub receipt: MerklePaymentReceipt,
+    /// The chunk data (hex encoded) for testing
+    pub chunk_data: String,
+    /// The chunk address
+    pub chunk_address: String,
+}
+
+/// Create a test proof for version verification.
+///
+/// This makes a small Merkle payment to create a valid proof that can be used
+/// with verify_version to test nodes.
+pub async fn create_test_proof(output: &str, network_context: NetworkContext) -> Result<()> {
+    // Get wallet from environment
+    let secret_key = std::env::var("SECRET_KEY").map_err(|_| {
+        eyre!(
+            "SECRET_KEY environment variable not set.\n\
+             Please set it to your EVM wallet private key (hex format, without 0x prefix)."
+        )
+    })?;
+
+    println!("Connecting to network...");
+    let client = connect_to_network(network_context)
+        .await
+        .map_err(|(err, _exit_code)| err)?;
+
+    // Create the wallet
+    let wallet = EvmWallet::new_from_private_key(client.evm_network().clone(), &secret_key)
+        .map_err(|e| eyre!("Failed to create wallet: {e}"))?;
+
+    println!("Wallet address: {:?}", wallet.address());
+    println!();
+
+    // Create two real chunks with known content
+    // We use timestamp to ensure unique addresses each time
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| eyre!("Failed to get timestamp: {e}"))?
+        .as_secs();
+
+    let chunk1_data = Bytes::from(format!("test_proof_chunk1_{timestamp}").into_bytes());
+    let chunk2_data = Bytes::from(format!("test_proof_chunk2_{timestamp}").into_bytes());
+
+    let chunk1 = Chunk::new(chunk1_data.clone());
+    let chunk2 = Chunk::new(chunk2_data);
+
+    let addr1 = *chunk1.name();
+    let addr2 = *chunk2.name();
+
+    println!("Creating Merkle payment for 2 test chunks...");
+    println!("  Chunk 1 address: {}", hex::encode(addr1));
+    println!("  Chunk 2 address: {}", hex::encode(addr2));
+    println!();
+
+    // Pay for the batch using Merkle payment
+    // Use Chunk data type and the actual chunk size
+    let data_size = chunk1_data.len();
+
+    println!("Submitting Merkle payment to smart contract...");
+    let receipt = client
+        .pay_for_merkle_batch(
+            DataTypes::Chunk,
+            vec![addr1, addr2].into_iter(),
+            data_size,
+            &wallet,
+        )
+        .await
+        .map_err(|e| eyre!("Failed to create Merkle payment: {e}"))?;
+
+    println!("Payment successful!");
+    println!("  Amount paid: {}", receipt.amount_paid);
+    println!("  Proofs generated: {}", receipt.proofs.len());
+    println!();
+
+    // Create the test proof data with the chunk included
+    let test_data = TestProofData {
+        receipt,
+        chunk_data: hex::encode(&chunk1_data),
+        chunk_address: hex::encode(addr1),
+    };
+
+    // Save to the output file
+    let json = serde_json::to_string_pretty(&test_data)
+        .map_err(|e| eyre!("Failed to serialize test data: {e}"))?;
+
+    std::fs::write(output, &json).map_err(|e| eyre!("Failed to write output file: {e}"))?;
+
+    println!("Test proof saved to: {output}");
+    println!();
+    println!("You can now use this proof with:");
+    println!("  ant developer verify-version -p {output}");
+
+    Ok(())
+}
+
+/// Indicator of actual node version based on error message analysis
+enum VersionIndicator {
+    /// Node is running old version (< 2025.12.2.1)
+    Old,
+    /// Could not confirm node is running old version
+    Unconfirmed,
+}
+
+/// Result of testing a single node
+enum TestResult {
+    Success {
+        peer_id: PeerId,
+        reported_version: autonomi::networking::version::PackageVersion,
+        actual_version_indicator: VersionIndicator,
+    },
+    Failed {
+        peer_id: PeerId,
+        error: String,
+    },
+}
+
+/// Test a node by sending a Merkle payment with a real proof and analyzing the error
+///
+/// This uses a valid proof from a previous payment. The node will verify the payment
+/// on the smart contract, but will fail when trying to verify the candidate pool
+/// (because the proof's candidate nodes are not the closest to the data address).
+/// The error message format reveals the node's actual code version.
+async fn test_node_with_merkle_proof(
+    client: &Client,
+    node_info: &PeerInfo,
+    proof: &MerklePaymentProof,
+    chunk: &Chunk,
+) -> Result<VersionIndicator> {
+    // Use the chunk's actual address
+    let chunk_address = *chunk.address();
+
+    // Serialize the record with the proof and chunk
+    let record_value = try_serialize_record(
+        &(proof.clone(), chunk.clone()),
+        RecordKind::DataWithMerklePayment(DataTypes::Chunk),
+    )
+    .map_err(|e| eyre!("Failed to serialize record: {e}"))?;
+
+    let record = Record {
+        key: NetworkAddress::from(chunk_address).to_record_key(),
+        value: record_value.to_vec(),
+        publisher: None,
+        expires: None,
+    };
+
+    // Send to the node and capture the error
+    // We use Quorum::One since we're only sending to one node
+    use autonomi::networking::Quorum;
+    let error_msg = match client
+        .network()
+        .put_record(record, vec![node_info.clone()], Quorum::One)
+        .await
+    {
+        Ok(_) => {
+            // Unexpected success - node accepted the payment
+            return Ok(VersionIndicator::Unconfirmed);
+        }
+        Err(e) => e.to_string(),
+    };
+
+    // Analyze the error message
+    analyze_error_for_version(&error_msg)
+}
+
+/// Analyze an error message to determine the node's actual version
+fn analyze_error_for_version(error_msg: &str) -> Result<VersionIndicator> {
+    // Old version error string
+    if error_msg.contains("Failed to get closest peers with majority knowledge to") {
+        return Ok(VersionIndicator::Old);
+    }
+
+    // Also check for other version-distinguishing patterns
+    if error_msg.contains("majority knowledge") {
+        return Ok(VersionIndicator::Old);
+    }
+
+    // Could not confirm old version
+    Ok(VersionIndicator::Unconfirmed)
+}
+
+/// Get random nodes from the network
+async fn get_random_nodes(client: &Client, count: usize) -> Result<Vec<PeerInfo>> {
+    use rand::seq::SliceRandom;
+
+    let mut seen_peers = std::collections::HashSet::new();
+    let mut all_peers = Vec::new();
+
+    // Keep querying until we have enough unique nodes or hit max attempts
+    const BATCH_SIZE: usize = 10; // Queries per batch
+    const MAX_BATCHES: usize = 20; // Max batches to try
+
+    for batch in 0..MAX_BATCHES {
+        if all_peers.len() >= count {
+            break;
+        }
+
+        // Run batch of queries in parallel
+        let query_futures = (0..BATCH_SIZE).map(|i| {
+            let client = client.clone();
+            let query_id = batch * BATCH_SIZE + i;
+            async move {
+                let random_addr = NetworkAddress::from(xor_name::XorName::from_content(
+                    format!("random_query_{query_id}_{}", rand::random::<u64>()).as_bytes(),
+                ));
+                client.network().get_closest_peers(random_addr, None).await
+            }
+        });
+
+        let results = futures::future::join_all(query_futures).await;
+
+        for peers in results.into_iter().flatten() {
+            for peer in peers {
+                if seen_peers.insert(peer.peer_id) {
+                    all_peers.push(peer);
+                }
+            }
+        }
+    }
+
+    if all_peers.is_empty() {
+        return Err(eyre!("Could not discover any nodes from the network"));
+    }
+
+    // Shuffle and take the requested count
+    let mut rng = rand::thread_rng();
+    all_peers.shuffle(&mut rng);
+    all_peers.truncate(count);
+
+    Ok(all_peers)
 }

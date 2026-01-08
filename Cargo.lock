@@ -870,9 +870,11 @@ name = "ant-cli"
 version = "0.4.15"
 dependencies = [
  "ant-build-info",
+ "ant-evm",
  "ant-logging",
  "ant-protocol",
  "autonomi",
+ "bytes",
  "chrono",
  "clap",
  "color-eyre",
@@ -885,6 +887,7 @@ dependencies = [
  "futures",
  "hex",
  "indicatif",
+ "libp2p",
  "rand 0.8.5",
  "rayon",
  "ring 0.17.14",

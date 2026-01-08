@@ -25,9 +25,12 @@ harness = false
 
 [dependencies]
 ant-build-info = { path = "../ant-build-info", version = "0.1.29" }
+ant-evm = { path = "../ant-evm", version = "0.1.19" }
 ant-logging = { path = "../ant-logging", version = "0.3.0" }
 ant-protocol = { path = "../ant-protocol", version = "1.0.11" }
 autonomi = { path = "../autonomi", version = "0.9.0", features = ["loud"] }
+bytes = "1.8.0"
+libp2p = { version = "0.56.0", features = ["ed25519", "kad"] }
 chrono = "0.4"
 clap = { version = "4.2.1", features = ["derive"] }
 color-eyre = "0.6.3"

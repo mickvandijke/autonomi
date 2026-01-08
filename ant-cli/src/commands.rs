@@ -519,6 +519,47 @@ pub enum DeveloperCmd {
         #[arg(name = "node")]
         node_addr: String,
     },
+    /// Verify that nodes are running the version they report.
+    ///
+    /// This command tests whether nodes are actually running the version they report
+    /// by sending a Merkle payment request and analyzing the error message format.
+    /// Nodes running pre-2025.12.2.1 will return a different error string than
+    /// newer nodes, allowing detection of version mismatches.
+    ///
+    /// Requires a valid test proof file created with 'create-test-proof'.
+    ///
+    /// If no nodes are specified, random nodes will be sampled from the network.
+    VerifyVersion {
+        /// Nodes to test: either PeerIds or full multiaddrs, comma-separated.
+        ///
+        /// Examples:
+        ///   - Single PeerId: 12D3KooWRBhwfeP2Y4TCx1SM6s9rUoHhR5STiGwxBhgFRcw3UERE
+        ///   - Multiple: 12D3KooWA...,12D3KooWB...
+        ///   - Multiaddr: /ip4/127.0.0.1/udp/12000/quic-v1/p2p/12D3KooW...
+        ///
+        /// When not specified, random nodes will be selected from the network.
+        #[arg(name = "nodes")]
+        node_addrs: Option<String>,
+        /// Number of random nodes to test when no specific nodes are provided.
+        #[arg(short = 'n', long, default_value = "5")]
+        count: usize,
+        /// Path to the test proof file (created with 'create-test-proof').
+        #[arg(short = 'p', long)]
+        proof_file: String,
+    },
+    /// Create a test proof for version verification.
+    ///
+    /// This command makes a small Merkle payment to the smart contract and saves
+    /// the resulting proof to a file. The proof can then be used with 'verify-version'
+    /// to test nodes.
+    ///
+    /// Requires SECRET_KEY environment variable with an EVM wallet private key
+    /// that has sufficient funds.
+    CreateTestProof {
+        /// Output file path for the test proof (JSON format).
+        #[arg(short = 'o', long, default_value = "test_proof.json")]
+        output: String,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -776,6 +817,17 @@ pub async fn handle_subcommand(opt: Opt) -> Result<()> {
             }
             DeveloperCmd::NodeVersion { node_addr } => {
                 developer::node_version(&node_addr, network_context).await
+            }
+            DeveloperCmd::VerifyVersion {
+                node_addrs,
+                count,
+                proof_file,
+            } => {
+                developer::verify_version(node_addrs.as_deref(), count, &proof_file, network_context)
+                    .await
+            }
+            DeveloperCmd::CreateTestProof { output } => {
+                developer::create_test_proof(&output, network_context).await
             }
         },
         None => {
