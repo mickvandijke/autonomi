@@ -285,14 +285,89 @@ impl Client {
             streams = upload_result.streams;
             results.extend(upload_result.completed_files);
 
-            // Retry failed chunks if any
-            if !upload_result.failed_chunks.is_empty() {
+            // Handle failed chunks - check for topology errors first
+            let mut failed_chunks = upload_result.failed_chunks;
+            let topology_errors = upload_result.topology_errors;
+
+            // If we have topology errors, try to recover by re-paying with correct candidates
+            if !failed_chunks.is_empty() && topology_errors.len() >= 3 {
+                info!(
+                    "Detected {} topology errors, attempting recovery with topology-based payment",
+                    topology_errors.len()
+                );
+                #[cfg(feature = "loud")]
+                println!(
+                    "⚠️ Detected topology mismatch, retrying with topology-based payment..."
+                );
+
+                // Find consensus from topology errors
+                match self.find_consensus_from_topology_errors(&topology_errors) {
+                    Ok(topology_candidates) => {
+                        info!(
+                            "Found topology consensus with {} candidates, making corrected payment",
+                            topology_candidates.len()
+                        );
+
+                        // Get the addresses that failed due to topology errors
+                        let failed_addresses: Vec<XorName> = failed_chunks
+                            .iter()
+                            .map(|(chunk, _)| *chunk.name())
+                            .collect();
+
+                        // Make corrected payment with topology-based candidates
+                        if let Some(w) = wallet {
+                            match self
+                                .pay_for_single_merkle_batch_with_topology(
+                                    DataTypes::Chunk,
+                                    failed_addresses,
+                                    MAX_CHUNK_SIZE,
+                                    &topology_candidates,
+                                    w,
+                                )
+                                .await
+                            {
+                                Ok(topology_receipt) => {
+                                    info!("Topology-based payment successful, retrying uploads");
+                                    #[cfg(feature = "loud")]
+                                    println!("✓ Topology-based payment successful, retrying uploads...");
+
+                                    // Merge the new receipt
+                                    receipt.merge(topology_receipt);
+
+                                    // Retry the failed chunks with the new receipt
+                                    let retry_result = self
+                                        .retry_failed_merkle_chunks_with_topology_receipt(
+                                            failed_chunks,
+                                            &receipt,
+                                            &mut already_exist,
+                                        )
+                                        .await
+                                        .map_err(|err| {
+                                            MerkleUploadErrorWithReceipt::upload(receipt.clone(), err)
+                                        })?;
+
+                                    failed_chunks = retry_result;
+                                }
+                                Err(e) => {
+                                    warn!("Topology-based payment failed: {e}, falling back to normal retry");
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to find topology consensus: {e}, falling back to normal retry");
+                    }
+                }
+            }
+
+            // Standard retry for any remaining failed chunks
+            if !failed_chunks.is_empty() {
                 const MAX_RETRIES: usize = 3;
                 const RETRY_PAUSE_SECS: u64 = 60;
 
                 let remaining_failures = self
                     .retry_failed_merkle_chunks(
-                        upload_result.failed_chunks,
+                        failed_chunks,
                         &receipt,
                         &mut already_exist,
                         MAX_RETRIES,

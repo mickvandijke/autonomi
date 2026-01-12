@@ -6,8 +6,8 @@
 // KIND, either express or implied. Please review the Licences for the specific language governing
 // permissions and limitations relating to use of the SAFE Network Software.
 
-use crate::{Client, networking::NetworkError};
 use super::candidate_consensus::CandidateConsensusError;
+use crate::{Client, networking::NetworkError};
 use ant_evm::{
     AttoTokens, EvmWallet,
     merkle_payments::{
@@ -96,6 +96,9 @@ impl Client {
     /// then queries ALL storing nodes for their view of merkle candidates and
     /// finds consensus across all of them.
     ///
+    /// NOTE: This method is no longer used by the default payment flow, which now uses
+    /// simple closest peers lookup. Kept for potential testing or alternative flows.
+    ///
     /// # Arguments
     /// * `chunk_addresses` - All chunk addresses that map to this midpoint
     /// * `midpoint_address` - The merkle tree midpoint address
@@ -105,6 +108,7 @@ impl Client {
     ///
     /// # Returns
     /// * Array of CANDIDATES_PER_POOL candidate nodes from the consensus set
+    #[allow(dead_code)]
     async fn get_merkle_candidate_pool(
         &self,
         chunk_addresses: Vec<XorName>,
@@ -135,8 +139,11 @@ impl Client {
 
         // Step 2: Build the list of candidates to query for quotes
         // Use the consensus merkle candidates
-        let candidates_to_query: HashSet<PeerId> =
-            consensus.consensus_merkle_candidates.iter().cloned().collect();
+        let candidates_to_query: HashSet<PeerId> = consensus
+            .consensus_merkle_candidates
+            .iter()
+            .cloned()
+            .collect();
 
         // Sort by distance to midpoint for consistent ordering
         let network_addr = NetworkAddress::ChunkAddress(ChunkAddress::new(midpoint_address));
@@ -149,7 +156,7 @@ impl Client {
         // Take the closest CANDIDATES_PER_POOL candidates
         let candidates_to_query: Vec<PeerId> = sorted_candidates
             .into_iter()
-            .take(CANDIDATES_PER_POOL + 5) // Query a few extra for fault tolerance
+            .take(CANDIDATES_PER_POOL + 4) // Query a few extra for fault tolerance
             .collect();
 
         if candidates_to_query.len() < CANDIDATES_PER_POOL {
@@ -175,12 +182,12 @@ impl Client {
         let mut peer_info_map_extended = peer_info_map;
         for triplet in &consensus.chunk_triplets {
             for (peer_id, addrs) in &triplet.storing_node_addrs {
-                peer_info_map_extended.entry(*peer_id).or_insert_with(|| {
-                    libp2p::kad::PeerInfo {
+                peer_info_map_extended
+                    .entry(*peer_id)
+                    .or_insert_with(|| libp2p::kad::PeerInfo {
                         peer_id: *peer_id,
                         addrs: addrs.clone(),
-                    }
-                });
+                    });
             }
         }
 
@@ -217,9 +224,7 @@ impl Client {
                     successful_candidates.push((peer_id, candidate));
                 }
                 Err(e) => {
-                    warn!(
-                        "Failed to get consensus quote from peer {peer_id:?}: {e}"
-                    );
+                    warn!("Failed to get consensus quote from peer {peer_id:?}: {e}");
                 }
             }
         }
@@ -265,13 +270,17 @@ impl Client {
         Ok(candidates_array)
     }
 
-    /// Build a single candidate pool for one midpoint proof.
+    /// Build a single candidate pool for one midpoint proof using simple closest peers lookup.
+    ///
+    /// This is a simplified version that doesn't do complex consensus - it just queries
+    /// the closest peers to the midpoint address directly. This is used for the initial
+    /// payment which may be corrected later via topology errors.
     ///
     /// # Arguments
     /// * `midpoint_proof` - The midpoint proof (contains leaf_addresses for this midpoint)
     /// * `data_type` - The data type being uploaded
     /// * `data_size` - The per-record data size
-    async fn build_single_candidate_pool(
+    async fn build_single_candidate_pool_simple(
         &self,
         midpoint_proof: MidpointProof,
         data_type: DataTypes,
@@ -279,33 +288,110 @@ impl Client {
     ) -> Result<MerklePaymentCandidatePool, MerklePaymentError> {
         let midpoint_address = midpoint_proof.address();
         let timestamp = midpoint_proof.merkle_payment_timestamp;
+        let network_addr = NetworkAddress::ChunkAddress(ChunkAddress::new(midpoint_address));
 
-        // Get chunk addresses from the midpoint proof
-        let chunk_addresses = midpoint_proof.leaf_addresses.clone();
+        debug!(
+            "Building simple candidate pool for midpoint {:?}",
+            midpoint_address
+        );
 
-        // Get candidates using consensus from ALL storing nodes of ALL chunks
-        let candidate_nodes = self
-            .get_merkle_candidate_pool(
-                chunk_addresses,
-                midpoint_address,
-                data_type,
-                data_size,
-                timestamp,
-            )
+        // Simply get closest peers to the midpoint - no consensus needed
+        let closest_peers = self
+            .network
+            .get_closest_peers(network_addr.clone(), Some(CANDIDATES_PER_POOL + 4))
             .await?;
+
+        if closest_peers.len() < CANDIDATES_PER_POOL {
+            return Err(MerklePaymentError::InsufficientCandidates {
+                got: closest_peers.len(),
+                needed: CANDIDATES_PER_POOL,
+            });
+        }
+
+        // Request quotes from closest peers
+        let mut tasks = FuturesUnordered::new();
+        for peer_info in closest_peers.iter().take(CANDIDATES_PER_POOL + 4) {
+            let network = self.network.clone();
+            let network_addr = network_addr.clone();
+            let data_type_index = data_type.get_index();
+            let peer_info = peer_info.clone();
+            let peer_id = peer_info.peer_id;
+            tasks.push(async move {
+                let result = network
+                    .get_merkle_candidate_quote(
+                        network_addr,
+                        peer_info,
+                        data_type_index,
+                        data_size,
+                        timestamp,
+                    )
+                    .await;
+                (peer_id, result)
+            });
+        }
+
+        // Collect successful responses
+        let mut successful_candidates: Vec<(PeerId, MerklePaymentCandidateNode)> = Vec::new();
+        use futures::StreamExt;
+        while let Some((peer_id, result)) = tasks.next().await {
+            match result {
+                Ok(candidate) => {
+                    successful_candidates.push((peer_id, candidate));
+                }
+                Err(e) => {
+                    warn!("Failed to get quote from peer {peer_id:?}: {e}");
+                }
+            }
+        }
+
+        if successful_candidates.len() < CANDIDATES_PER_POOL {
+            return Err(MerklePaymentError::InsufficientCandidates {
+                got: successful_candidates.len(),
+                needed: CANDIDATES_PER_POOL,
+            });
+        }
+
+        // Sort by distance and take closest
+        successful_candidates.sort_by_key(|(peer_id, _)| {
+            let peer_addr = NetworkAddress::from(*peer_id);
+            network_addr.distance(&peer_addr)
+        });
+
+        let closest_successful: Vec<MerklePaymentCandidateNode> = successful_candidates
+            .into_iter()
+            .take(CANDIDATES_PER_POOL)
+            .map(|(_, candidate)| candidate)
+            .collect();
+
+        let candidates_array: [MerklePaymentCandidateNode; CANDIDATES_PER_POOL] =
+            closest_successful.try_into().map_err(|v: Vec<_>| {
+                MerklePaymentError::InsufficientCandidates {
+                    got: v.len(),
+                    needed: CANDIDATES_PER_POOL,
+                }
+            })?;
 
         let pool = MerklePaymentCandidatePool {
             midpoint_proof,
-            candidate_nodes,
+            candidate_nodes: candidates_array,
         };
 
-        // Validate signatures before accepting the pool
+        // Validate signatures
         pool.verify_signatures(timestamp)?;
+
+        debug!(
+            "Built simple candidate pool for midpoint {:?}",
+            midpoint_address
+        );
 
         Ok(pool)
     }
 
-    /// Build candidate pools for all midpoint proofs (in parallel).
+    /// Build candidate pools for all midpoint proofs (in parallel) using simple closest peers lookup.
+    ///
+    /// This uses a simplified approach that doesn't require consensus - it just queries
+    /// the closest peers to each midpoint address directly. The initial payment may be
+    /// corrected later via topology errors if the simple lookup doesn't match.
     ///
     /// # Arguments
     /// * `midpoint_proofs` - The midpoint proofs from the merkle tree (each contains leaf_addresses)
@@ -321,7 +407,7 @@ impl Client {
             let client = self.clone();
             async move {
                 client
-                    .build_single_candidate_pool(proof, data_type, data_size)
+                    .build_single_candidate_pool_simple(proof, data_type, data_size)
                     .await
             }
         });
@@ -330,7 +416,12 @@ impl Client {
         Ok(pools)
     }
 
-    /// Prepare a Merkle batch - builds tree, queries candidate pools using consensus.
+    /// Prepare a Merkle batch - builds tree, queries candidate pools using simple closest peers.
+    ///
+    /// The initial payment uses a simplified approach without complex consensus.
+    /// If uploads fail with topology errors, the payment will be corrected using
+    /// the topology-based candidates from the error responses.
+    ///
     /// Returns (tree, candidate_pools, pool_commitments, timestamp)
     pub(crate) async fn prepare_merkle_batch(
         &self,
@@ -510,5 +601,269 @@ impl Client {
         }
 
         Ok(merged_receipt)
+    }
+
+    /// Build candidate pools using topology-based consensus (from TopologyVerificationFailed errors).
+    ///
+    /// This bypasses the RT-based consensus and directly queries the peers identified
+    /// from topology errors for their quotes.
+    ///
+    /// # Arguments
+    /// * `midpoint_proofs` - The midpoint proofs from the merkle tree
+    /// * `topology_candidates` - Peer IDs from topology error consensus
+    /// * `data_type` - The data type being uploaded
+    /// * `data_size` - The per-record data size
+    pub(crate) async fn build_candidate_pools_from_topology(
+        &self,
+        midpoint_proofs: Vec<MidpointProof>,
+        topology_candidates: &[PeerId],
+        data_type: DataTypes,
+        data_size: usize,
+    ) -> Result<Vec<MerklePaymentCandidatePool>, MerklePaymentError> {
+        let pool_futures = midpoint_proofs.into_iter().map(|proof| {
+            let client = self.clone();
+            let candidates = topology_candidates.to_vec();
+            async move {
+                client
+                    .build_single_candidate_pool_from_topology(
+                        proof,
+                        &candidates,
+                        data_type,
+                        data_size,
+                    )
+                    .await
+            }
+        });
+        let pools = futures::future::try_join_all(pool_futures).await?;
+        Ok(pools)
+    }
+
+    /// Build a single candidate pool using topology-based candidates.
+    async fn build_single_candidate_pool_from_topology(
+        &self,
+        midpoint_proof: MidpointProof,
+        topology_candidates: &[PeerId],
+        data_type: DataTypes,
+        data_size: usize,
+    ) -> Result<MerklePaymentCandidatePool, MerklePaymentError> {
+        let midpoint_address = midpoint_proof.address();
+        let timestamp = midpoint_proof.merkle_payment_timestamp;
+        let network_addr = NetworkAddress::ChunkAddress(ChunkAddress::new(midpoint_address));
+
+        info!(
+            "Building candidate pool from {} topology candidates for midpoint {:?}",
+            topology_candidates.len(),
+            midpoint_address
+        );
+
+        // Get peer info (addresses) for the topology candidates
+        let closest_peers = self
+            .network
+            .get_closest_peers(network_addr.clone(), Some(CANDIDATES_PER_POOL + 10))
+            .await?;
+
+        let peer_info_map: HashMap<PeerId, libp2p::kad::PeerInfo> = closest_peers
+            .into_iter()
+            .map(|info| (info.peer_id, info))
+            .collect();
+
+        // Request quotes from topology-based candidates
+        let mut tasks = FuturesUnordered::new();
+        for peer_id in topology_candidates.iter().take(CANDIDATES_PER_POOL + 5) {
+            if let Some(peer_info) = peer_info_map.get(peer_id) {
+                let network = self.network.clone();
+                let network_addr = network_addr.clone();
+                let data_type_index = data_type.get_index();
+                let peer_info = peer_info.clone();
+                let peer_id = *peer_id;
+                tasks.push(async move {
+                    let result = network
+                        .get_merkle_candidate_quote(
+                            network_addr,
+                            peer_info,
+                            data_type_index,
+                            data_size,
+                            timestamp,
+                        )
+                        .await;
+                    (peer_id, result)
+                });
+            } else {
+                debug!(
+                    "No peer info for topology candidate {:?}, skipping",
+                    peer_id
+                );
+            }
+        }
+
+        // Collect successful responses
+        let mut successful_candidates: Vec<(PeerId, MerklePaymentCandidateNode)> = Vec::new();
+        use futures::StreamExt;
+        while let Some((peer_id, result)) = tasks.next().await {
+            match result {
+                Ok(candidate) => {
+                    successful_candidates.push((peer_id, candidate));
+                }
+                Err(e) => {
+                    warn!("Failed to get quote from topology candidate {peer_id:?}: {e}");
+                }
+            }
+        }
+
+        debug!(
+            "Got {} successful quotes from topology candidates for midpoint {midpoint_address:?}",
+            successful_candidates.len()
+        );
+
+        if successful_candidates.len() < CANDIDATES_PER_POOL {
+            return Err(MerklePaymentError::InsufficientCandidates {
+                got: successful_candidates.len(),
+                needed: CANDIDATES_PER_POOL,
+            });
+        }
+
+        // Sort by distance and take closest
+        successful_candidates.sort_by_key(|(peer_id, _)| {
+            let peer_addr = NetworkAddress::from(*peer_id);
+            network_addr.distance(&peer_addr)
+        });
+
+        let closest_successful: Vec<MerklePaymentCandidateNode> = successful_candidates
+            .into_iter()
+            .take(CANDIDATES_PER_POOL)
+            .map(|(_, candidate)| candidate)
+            .collect();
+
+        let candidates_array: [MerklePaymentCandidateNode; CANDIDATES_PER_POOL] =
+            closest_successful.try_into().map_err(|v: Vec<_>| {
+                MerklePaymentError::InsufficientCandidates {
+                    got: v.len(),
+                    needed: CANDIDATES_PER_POOL,
+                }
+            })?;
+
+        let pool = MerklePaymentCandidatePool {
+            midpoint_proof,
+            candidate_nodes: candidates_array,
+        };
+
+        // Validate signatures
+        pool.verify_signatures(timestamp)?;
+
+        info!("Successfully built topology-based candidate pool for midpoint {midpoint_address:?}");
+
+        Ok(pool)
+    }
+
+    /// Pay for a single batch using topology-based candidates.
+    ///
+    /// This is used for recovery when the initial RT-based payment failed due to
+    /// topology verification errors. It uses the candidates identified from the
+    /// topology errors to make a corrected payment.
+    ///
+    /// # Arguments
+    /// * `data_type` - The data type being uploaded
+    /// * `addresses` - The chunk addresses
+    /// * `data_size` - The per-record data size
+    /// * `topology_candidates` - Peer IDs from topology error consensus
+    /// * `wallet` - The EVM wallet to pay with
+    pub(crate) async fn pay_for_single_merkle_batch_with_topology(
+        &self,
+        data_type: DataTypes,
+        addresses: Vec<XorName>,
+        data_size: usize,
+        topology_candidates: &[PeerId],
+        wallet: &EvmWallet,
+    ) -> Result<MerklePaymentReceipt, MerklePaymentError> {
+        info!(
+            "Making topology-based payment for {} addresses with {} candidates",
+            addresses.len(),
+            topology_candidates.len()
+        );
+
+        if addresses.is_empty() {
+            return Err(MerklePaymentError::InsufficientCandidates { got: 0, needed: 1 });
+        }
+
+        // Pad to minimum 2 leaves if only 1 address
+        let addresses = match addresses[..] {
+            [only_one] => vec![only_one, only_one],
+            _ => addresses,
+        };
+
+        // Build Merkle tree
+        let tree = MerkleTree::from_xornames(addresses.clone())?;
+        let depth = tree.depth();
+        info!("Built Merkle tree for topology payment: depth={depth}");
+
+        // Get timestamp and reward candidates
+        let merkle_payment_timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs();
+        let midpoint_proofs = tree.reward_candidates(merkle_payment_timestamp, &addresses)?;
+
+        // Build candidate pools using topology-based candidates
+        let candidate_pools = self
+            .build_candidate_pools_from_topology(
+                midpoint_proofs,
+                topology_candidates,
+                data_type,
+                data_size,
+            )
+            .await?;
+
+        // Convert to pool commitments
+        let pool_commitments: Vec<PoolCommitment> = candidate_pools
+            .iter()
+            .map(|pool| pool.to_commitment())
+            .collect();
+
+        // Submit payment to smart contract
+        debug!("Waiting for wallet lock (topology payment)");
+        let lock_guard = wallet.lock().await;
+        debug!("Locked wallet");
+        let (winner_pool_hash, amount) = wallet
+            .pay_for_merkle_tree(depth, pool_commitments, merkle_payment_timestamp)
+            .await?;
+        let amount = AttoTokens::from_atto(amount);
+        drop(lock_guard);
+        debug!("Unlocked wallet");
+
+        info!("Topology payment submitted, winner pool: {winner_pool_hash:?}, amount: {amount}");
+
+        // Find winner pool and generate proofs
+        let winner_pool = candidate_pools
+            .into_iter()
+            .find(|pool| pool.hash() == winner_pool_hash)
+            .ok_or_else(|| {
+                MerklePaymentError::SmartContract(format!(
+                    "Smart contract returned invalid pool hash: {}",
+                    hex::encode(winner_pool_hash)
+                ))
+            })?;
+
+        let mut proofs = HashMap::new();
+        for (i, address) in addresses.into_iter().enumerate() {
+            let address_proof = tree.generate_address_proof(i, address)?;
+            let payment_proof = MerklePaymentProof {
+                address,
+                data_proof: address_proof,
+                winner_pool: winner_pool.clone(),
+            };
+            proofs.insert(address, payment_proof);
+        }
+
+        let receipt = MerklePaymentReceipt {
+            proofs,
+            file_chunk_counts: HashMap::new(),
+            amount_paid: amount,
+        };
+
+        info!(
+            "Generated {} topology-based Merkle payment proofs, total amount: {amount}",
+            receipt.proofs.len()
+        );
+
+        Ok(receipt)
     }
 }

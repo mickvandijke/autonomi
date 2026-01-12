@@ -6,6 +6,7 @@
 // KIND, either express or implied. Please review the Licences for the specific language governing
 // permissions and limitations relating to use of the SAFE Network Software.
 
+use super::candidate_consensus::TopologyErrorCollection;
 use super::payments::MerklePaymentReceipt;
 use crate::Client;
 use crate::client::config::CHUNK_UPLOAD_BATCH_SIZE;
@@ -76,6 +77,8 @@ pub struct MerkleBatchUploadResult {
     pub completed_files: Vec<(PathBuf, DataMapChunk, Metadata)>,
     /// Chunks that failed to upload with their error messages
     pub failed_chunks: Vec<(Chunk, String)>,
+    /// Topology errors collected during upload (for detecting wrong merkle candidates)
+    pub topology_errors: TopologyErrorCollection,
 }
 
 impl Client {
@@ -104,6 +107,7 @@ impl Client {
     ) -> Result<MerkleBatchUploadResult, MerklePutError> {
         let mut completed_files: Vec<(PathBuf, DataMapChunk, Metadata)> = Vec::new();
         let mut all_failed_chunks: Vec<(Chunk, String)> = Vec::new();
+        let mut topology_errors = TopologyErrorCollection::new();
         let mut chunks_uploaded = 0;
         let mut chunks_attempted = 0;
         let total_files = receipt.file_chunk_counts.len();
@@ -165,6 +169,10 @@ impl Client {
                                     "Chunk failed to be stored at: {:?} ({err})",
                                     chunk.address()
                                 );
+                                // Check if this is a topology error and collect it
+                                if let MerklePutError::Network(ref network_err) = err {
+                                    topology_errors.add_from_network_error(network_err);
+                                }
                                 all_failed_chunks.push((chunk, err.to_string()));
                             }
                         }
@@ -195,6 +203,7 @@ impl Client {
             streams,
             completed_files,
             failed_chunks: all_failed_chunks,
+            topology_errors,
         })
     }
 
@@ -331,5 +340,85 @@ impl Client {
         }
 
         Ok(failed_chunks)
+    }
+
+    /// Retry uploading failed chunks immediately with a topology-corrected receipt.
+    ///
+    /// This is used after topology error recovery - it retries without pause since
+    /// we've already made a corrected payment and want to complete quickly.
+    ///
+    /// Returns remaining failed chunks (empty if all succeeded).
+    pub async fn retry_failed_merkle_chunks_with_topology_receipt(
+        &self,
+        failed_chunks: Vec<(Chunk, String)>,
+        receipt: &MerklePaymentReceipt,
+        already_exist: &mut HashSet<XorName>,
+    ) -> Result<Vec<(Chunk, String)>, MerklePutError> {
+        let upload_batch_size = std::cmp::max(1, *CHUNK_UPLOAD_BATCH_SIZE);
+        let failed_count = failed_chunks.len();
+
+        info!(
+            "Retrying {} chunks with topology-corrected receipt",
+            failed_count
+        );
+
+        // Build upload tasks
+        let chunks_to_retry: Vec<Chunk> = failed_chunks
+            .into_iter()
+            .map(|(chunk, _)| chunk)
+            .collect();
+        let mut tasks = Vec::with_capacity(chunks_to_retry.len());
+
+        for chunk in chunks_to_retry {
+            let xor_name = *chunk.name();
+            if already_exist.contains(&xor_name) {
+                continue;
+            }
+
+            let Some(proof) = receipt.proofs.get(&xor_name).cloned() else {
+                return Err(MerklePutError::MissingPaymentProofFor(xor_name));
+            };
+
+            let client = self.clone();
+            tasks.push(async move {
+                let result = client.upload_chunk_with_merkle_proof(&chunk, &proof).await;
+                (chunk, result)
+            });
+        }
+
+        let results = process_tasks_with_max_concurrency(tasks, upload_batch_size).await;
+
+        // Collect new failures
+        let mut new_failed_chunks = Vec::new();
+        for (chunk, result) in results {
+            match result {
+                Ok(addr) => {
+                    already_exist.insert(*addr.xorname());
+                    debug!("Topology retry succeeded for chunk: {addr:?}");
+                    #[cfg(feature = "loud")]
+                    println!("✓ Topology retry succeeded for chunk: {addr:?}");
+                }
+                Err(err) => {
+                    error!(
+                        "Topology retry failed for chunk {:?}: {err}",
+                        chunk.address()
+                    );
+                    #[cfg(feature = "loud")]
+                    println!(
+                        "✗ Topology retry failed for chunk {:?}: {err}",
+                        chunk.address()
+                    );
+                    new_failed_chunks.push((chunk, err.to_string()));
+                }
+            }
+        }
+
+        info!(
+            "Topology retry complete: {}/{} succeeded",
+            failed_count - new_failed_chunks.len(),
+            failed_count
+        );
+
+        Ok(new_failed_chunks)
     }
 }
