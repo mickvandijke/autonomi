@@ -76,18 +76,18 @@
 //!    agree on at least CANDIDATES_PER_POOL merkle candidates
 //! 4. If initial payment was wrong, collect TopologyVerificationFailed errors and retry
 
-use crate::networking::NetworkError;
 use crate::Client;
+use crate::networking::NetworkError;
 use ant_evm::merkle_payments::CANDIDATES_PER_POOL;
-use ant_protocol::storage::ChunkAddress;
 use ant_protocol::NetworkAddress;
+use ant_protocol::storage::ChunkAddress;
 use libp2p::{Multiaddr, PeerId};
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, info, trace, warn};
 use xor_name::XorName;
 
 /// Number of storing nodes to query per chunk when looking for mutual triplets
-const STORING_NODES_TO_QUERY_PER_CHUNK: usize = 10;
+const STORING_NODES_TO_QUERY_PER_CHUNK: usize = 20;
 
 /// Minimum overlap required between storing node views to consider them in consensus
 const MIN_OVERLAP_THRESHOLD: usize = CANDIDATES_PER_POOL;
@@ -237,8 +237,13 @@ fn format_candidates_per_node(candidates: &HashMap<PeerId, Vec<PeerId>>) -> Stri
 pub enum CandidateConsensusError {
     #[error("Network error: {0}")]
     Network(#[from] NetworkError),
-    #[error("No mutual triplet found for chunk {chunk_address:?}: queried {queried} peers but couldn't find 3 with mutual close group membership")]
-    NoMutualTripletForChunk { chunk_address: XorName, queried: usize },
+    #[error(
+        "No mutual triplet found for chunk {chunk_address:?}: queried {queried} peers but couldn't find 3 with mutual close group membership"
+    )]
+    NoMutualTripletForChunk {
+        chunk_address: XorName,
+        queried: usize,
+    },
     #[error("Insufficient candidate overlap across storing nodes: only {overlap} common candidates, need at least {required}\nCandidates per storing node:\n{}", format_candidates_per_node(.candidates_per_node))]
     InsufficientOverlap {
         overlap: usize,
@@ -277,12 +282,16 @@ impl Client {
         midpoint_address: XorName,
     ) -> Result<Vec<StoringNodeMerkleView>, CandidateConsensusError> {
         let chunk_network_addr = NetworkAddress::ChunkAddress(ChunkAddress::new(chunk_address));
-        let midpoint_network_addr = NetworkAddress::ChunkAddress(ChunkAddress::new(midpoint_address));
+        let midpoint_network_addr =
+            NetworkAddress::ChunkAddress(ChunkAddress::new(midpoint_address));
 
         // Get candidate storing nodes close to the chunk address
         let candidate_nodes = self
             .network
-            .get_closest_peers(chunk_network_addr.clone(), Some(STORING_NODES_TO_QUERY_PER_CHUNK))
+            .get_closest_peers(
+                chunk_network_addr.clone(),
+                Some(STORING_NODES_TO_QUERY_PER_CHUNK),
+            )
             .await?;
 
         debug!(
@@ -303,12 +312,20 @@ impl Client {
             query_tasks.push(async move {
                 // Query close group (nodes near this chunk)
                 let close_group_result = network
-                    .get_closest_peers_from_peer(chunk_addr, peer.clone(), Some(STORING_NODES_TO_QUERY_PER_CHUNK))
+                    .get_closest_peers_from_peer(
+                        chunk_addr,
+                        peer.clone(),
+                        Some(STORING_NODES_TO_QUERY_PER_CHUNK),
+                    )
                     .await;
 
                 // Query merkle candidates (nodes near the midpoint)
                 let merkle_candidates_result = network
-                    .get_closest_peers_from_peer(midpoint_addr, peer.clone(), Some(CANDIDATES_PER_POOL + 5))
+                    .get_closest_peers_from_peer(
+                        midpoint_addr,
+                        peer.clone(),
+                        Some(CANDIDATES_PER_POOL + 4),
+                    )
                     .await;
 
                 (peer, close_group_result, merkle_candidates_result)
@@ -321,17 +338,29 @@ impl Client {
 
         for (peer_info, close_group_result, merkle_candidates_result) in results {
             let close_group_view: Vec<PeerId> = match close_group_result {
-                Ok(list) => list.iter().filter_map(|(addr, _)| addr.as_peer_id()).collect(),
+                Ok(list) => list
+                    .iter()
+                    .filter_map(|(addr, _)| addr.as_peer_id())
+                    .collect(),
                 Err(e) => {
-                    warn!("Failed to get close group from {:?}: {}", peer_info.peer_id, e);
+                    warn!(
+                        "Failed to get close group from {:?}: {}",
+                        peer_info.peer_id, e
+                    );
                     continue;
                 }
             };
 
             let merkle_candidates_view: Vec<PeerId> = match merkle_candidates_result {
-                Ok(list) => list.iter().filter_map(|(addr, _)| addr.as_peer_id()).collect(),
+                Ok(list) => list
+                    .iter()
+                    .filter_map(|(addr, _)| addr.as_peer_id())
+                    .collect(),
                 Err(e) => {
-                    warn!("Failed to get merkle candidates from {:?}: {}", peer_info.peer_id, e);
+                    warn!(
+                        "Failed to get merkle candidates from {:?}: {}",
+                        peer_info.peer_id, e
+                    );
                     continue;
                 }
             };
@@ -420,7 +449,10 @@ impl Client {
 
         let candidate_nodes = self
             .network
-            .get_closest_peers(chunk_network_addr.clone(), Some(STORING_NODES_TO_QUERY_PER_CHUNK))
+            .get_closest_peers(
+                chunk_network_addr.clone(),
+                Some(STORING_NODES_TO_QUERY_PER_CHUNK),
+            )
             .await?;
 
         let mut views: Vec<StoringNodeMerkleView> = Vec::new();
@@ -433,7 +465,11 @@ impl Client {
 
             query_tasks.push(async move {
                 let close_group_result = network
-                    .get_closest_peers_from_peer(addr, peer.clone(), Some(STORING_NODES_TO_QUERY_PER_CHUNK))
+                    .get_closest_peers_from_peer(
+                        addr,
+                        peer.clone(),
+                        Some(STORING_NODES_TO_QUERY_PER_CHUNK),
+                    )
                     .await;
                 (peer, close_group_result)
             });
@@ -458,7 +494,10 @@ impl Client {
                     });
                 }
                 Err(e) => {
-                    warn!("Failed to get close group from {:?}: {}", peer_info.peer_id, e);
+                    warn!(
+                        "Failed to get close group from {:?}: {}",
+                        peer_info.peer_id, e
+                    );
                 }
             }
         }
@@ -489,7 +528,9 @@ impl Client {
 
             let triplet_views: Vec<StoringNodeMerkleView> = views
                 .into_iter()
-                .filter(|v| v.storing_node_id == a || v.storing_node_id == b || v.storing_node_id == c)
+                .filter(|v| {
+                    v.storing_node_id == a || v.storing_node_id == b || v.storing_node_id == c
+                })
                 .collect();
 
             return Ok((chunk_triplet, triplet_views));
@@ -514,7 +555,8 @@ impl Client {
         storing_nodes: &[(PeerId, Vec<Multiaddr>)],
         midpoint_address: XorName,
     ) -> Result<HashMap<PeerId, Vec<PeerId>>, CandidateConsensusError> {
-        let midpoint_network_addr = NetworkAddress::ChunkAddress(ChunkAddress::new(midpoint_address));
+        let midpoint_network_addr =
+            NetworkAddress::ChunkAddress(ChunkAddress::new(midpoint_address));
 
         let mut query_tasks = Vec::new();
 
@@ -716,7 +758,8 @@ impl Client {
             }
         }
 
-        let consensus_merkle_candidates = self.find_merkle_candidate_intersection(&all_merkle_views)?;
+        let consensus_merkle_candidates =
+            self.find_merkle_candidate_intersection(&all_merkle_views)?;
 
         info!(
             "Midpoint consensus: {} storing nodes agree on {} merkle candidates",
@@ -752,7 +795,11 @@ impl Client {
         // Base case: all chunks have been assigned a triplet
         if chunk_idx >= chunk_valid_triplets.len() {
             // Check if this combination has enough consensus
-            let consensus_size = self.calculate_consensus_size(chunk_views, chunk_valid_triplets, &current_selection);
+            let consensus_size = self.calculate_consensus_size(
+                chunk_views,
+                chunk_valid_triplets,
+                &current_selection,
+            );
             if consensus_size >= CANDIDATES_PER_POOL {
                 return Ok(current_selection);
             }
@@ -775,13 +822,12 @@ impl Client {
             new_selection.push(triplet_idx);
 
             // Early pruning: check if current partial selection already has too little overlap
-            let partial_consensus = self.calculate_consensus_size(chunk_views, chunk_valid_triplets, &new_selection);
+            let partial_consensus =
+                self.calculate_consensus_size(chunk_views, chunk_valid_triplets, &new_selection);
             if partial_consensus < CANDIDATES_PER_POOL {
                 trace!(
                     "Pruning: chunk {:?} triplet {} gives only {} overlap",
-                    chunk_addr,
-                    triplet_idx,
-                    partial_consensus
+                    chunk_addr, triplet_idx, partial_consensus
                 );
                 continue;
             }
@@ -827,7 +873,8 @@ impl Client {
 
             for &view_idx in &triplet.indices {
                 let view = &views[view_idx];
-                let view_set: HashSet<PeerId> = view.merkle_candidates_view.iter().cloned().collect();
+                let view_set: HashSet<PeerId> =
+                    view.merkle_candidates_view.iter().cloned().collect();
 
                 intersection = Some(match intersection {
                     None => view_set,
@@ -900,15 +947,10 @@ impl Client {
         errors: &TopologyErrorCollection,
     ) -> Result<Vec<PeerId>, CandidateConsensusError> {
         if errors.len() < 3 {
-            return Err(CandidateConsensusError::InsufficientTopologyErrors {
-                got: errors.len(),
-            });
+            return Err(CandidateConsensusError::InsufficientTopologyErrors { got: errors.len() });
         }
 
-        info!(
-            "Finding consensus from {} topology errors",
-            errors.len()
-        );
+        info!("Finding consensus from {} topology errors", errors.len());
 
         // Convert topology errors to merkle views
         // The node_peers field contains the network-lookup-based view
@@ -992,15 +1034,24 @@ mod tests {
         let mut merkle_views: HashMap<PeerId, Vec<PeerId>> = HashMap::new();
         merkle_views.insert(
             p1,
-            vec![common1, common2, common3, common4, common5, common6, common7, common8, common9, common10, extra1],
+            vec![
+                common1, common2, common3, common4, common5, common6, common7, common8, common9,
+                common10, extra1,
+            ],
         );
         merkle_views.insert(
             p2,
-            vec![common1, common2, common3, common4, common5, common6, common7, common8, common9, common10, extra2],
+            vec![
+                common1, common2, common3, common4, common5, common6, common7, common8, common9,
+                common10, extra2,
+            ],
         );
         merkle_views.insert(
             p3,
-            vec![common1, common2, common3, common4, common5, common6, common7, common8, common9, common10],
+            vec![
+                common1, common2, common3, common4, common5, common6, common7, common8, common9,
+                common10,
+            ],
         );
 
         // Find intersection manually
