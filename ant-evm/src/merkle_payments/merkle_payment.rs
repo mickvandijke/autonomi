@@ -658,10 +658,10 @@ mod tests {
 
         // Create a simple merkle tree
         let addresses = make_test_addresses(10);
-        let tree = MerkleTree::from_xornames(addresses).unwrap();
+        let tree = MerkleTree::from_xornames(addresses.clone()).unwrap();
 
         // Get a reward candidate pool
-        let reward_candidates = tree.reward_candidates(timestamp).unwrap();
+        let reward_candidates = tree.reward_candidates(timestamp, &addresses).unwrap();
         let reward_pool = &reward_candidates[0];
 
         // Create candidate nodes array directly
@@ -747,8 +747,8 @@ mod tests {
 
         // Create a valid pool with properly signed nodes
         let addresses = make_test_addresses(10);
-        let tree = MerkleTree::from_xornames(addresses).unwrap();
-        let reward_candidates = tree.reward_candidates(timestamp).unwrap();
+        let tree = MerkleTree::from_xornames(addresses.clone()).unwrap();
+        let reward_candidates = tree.reward_candidates(timestamp, &addresses).unwrap();
         let reward_pool = &reward_candidates[0];
 
         // Create candidate nodes array directly
@@ -791,8 +791,8 @@ mod tests {
 
         // Create a valid pool
         let addresses = make_test_addresses(10);
-        let tree = MerkleTree::from_xornames(addresses).unwrap();
-        let reward_candidates = tree.reward_candidates(timestamp).unwrap();
+        let tree = MerkleTree::from_xornames(addresses.clone()).unwrap();
+        let reward_candidates = tree.reward_candidates(timestamp, &addresses).unwrap();
         let reward_pool = &reward_candidates[0];
 
         // Create candidate nodes array directly
@@ -890,8 +890,8 @@ mod tests {
 
         // Hashes of pools containing these nodes should be deterministic
         let addresses = make_test_addresses(10);
-        let tree = MerkleTree::from_xornames(addresses).unwrap();
-        let reward_candidates = tree.reward_candidates(timestamp).unwrap();
+        let tree = MerkleTree::from_xornames(addresses.clone()).unwrap();
+        let reward_candidates = tree.reward_candidates(timestamp, &addresses).unwrap();
         let reward_pool = &reward_candidates[0];
 
         let pool1 = MerklePaymentCandidatePool {
@@ -921,7 +921,7 @@ mod tests {
         // Create a merkle tree and get a reward pool
         let addresses = make_test_addresses(10);
         let tree = MerkleTree::from_xornames(addresses.clone()).unwrap();
-        let reward_candidates = tree.reward_candidates(timestamp).unwrap();
+        let reward_candidates = tree.reward_candidates(timestamp, &addresses).unwrap();
         let reward_pool = &reward_candidates[0];
 
         // Create candidate nodes array and track their PeerIds
@@ -976,7 +976,7 @@ mod tests {
         // Create a merkle tree and get a reward pool
         let addresses = make_test_addresses(10);
         let tree = MerkleTree::from_xornames(addresses.clone()).unwrap();
-        let reward_candidates = tree.reward_candidates(timestamp).unwrap();
+        let reward_candidates = tree.reward_candidates(timestamp, &addresses).unwrap();
         let reward_pool = &reward_candidates[0];
 
         // Create candidate nodes array directly
@@ -1019,7 +1019,7 @@ mod tests {
         // Create a merkle tree and get a reward pool
         let addresses = make_test_addresses(10);
         let tree = MerkleTree::from_xornames(addresses.clone()).unwrap();
-        let reward_candidates = tree.reward_candidates(timestamp).unwrap();
+        let reward_candidates = tree.reward_candidates(timestamp, &addresses).unwrap();
         let reward_pool = &reward_candidates[0];
 
         // Create candidate nodes array directly
@@ -1069,7 +1069,7 @@ mod tests {
         // Create a merkle tree and get a reward pool
         let addresses = make_test_addresses(10);
         let tree = MerkleTree::from_xornames(addresses.clone()).unwrap();
-        let reward_candidates = tree.reward_candidates(timestamp).unwrap();
+        let reward_candidates = tree.reward_candidates(timestamp, &addresses).unwrap();
         let reward_pool = &reward_candidates[0];
 
         // Create candidate nodes where MULTIPLE nodes share the SAME reward address
@@ -1158,7 +1158,7 @@ mod tests {
         // Create a merkle tree and get a reward pool
         let addresses = make_test_addresses(10);
         let tree = MerkleTree::from_xornames(addresses.clone()).unwrap();
-        let reward_candidates = tree.reward_candidates(timestamp).unwrap();
+        let reward_candidates = tree.reward_candidates(timestamp, &addresses).unwrap();
         let reward_pool = &reward_candidates[0];
 
         // Create candidate nodes
@@ -1217,7 +1217,7 @@ mod tests {
         // Create a merkle tree and get a reward pool
         let addresses = make_test_addresses(10);
         let tree = MerkleTree::from_xornames(addresses.clone()).unwrap();
-        let reward_candidates = tree.reward_candidates(timestamp).unwrap();
+        let reward_candidates = tree.reward_candidates(timestamp, &addresses).unwrap();
         let reward_pool = &reward_candidates[0];
 
         // Create candidate nodes
@@ -1265,7 +1265,7 @@ mod tests {
         // Create a merkle tree and get a reward pool
         let addresses = make_test_addresses(10);
         let tree = MerkleTree::from_xornames(addresses.clone()).unwrap();
-        let reward_candidates = tree.reward_candidates(timestamp).unwrap();
+        let reward_candidates = tree.reward_candidates(timestamp, &addresses).unwrap();
         let reward_pool = &reward_candidates[0];
 
         // Create 20 candidate nodes
@@ -1345,7 +1345,7 @@ mod tests {
             .unwrap()
             .as_secs();
 
-        let reward_candidates = tree.reward_candidates(merkle_payment_timestamp).unwrap();
+        let reward_candidates = tree.reward_candidates(merkle_payment_timestamp, &addresses).unwrap();
         let expected_pools = crate::merkle_payments::expected_reward_pools(depth);
         assert_eq!(reward_candidates.len(), expected_pools);
 

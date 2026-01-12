@@ -6,10 +6,15 @@
 // KIND, either express or implied. Please review the Licences for the specific language governing
 // permissions and limitations relating to use of the SAFE Network Software.
 
+mod candidate_consensus;
 mod file;
 mod payments;
 mod upload;
 
+pub use candidate_consensus::{
+    CandidateConsensusError, ChunkStoringTriplet, MidpointConsensus, StoringNodeMerkleView,
+    TopologyErrorCollection, TopologyErrorInfo,
+};
 pub use file::{MerklePaymentOption, MerkleUploadError, MerkleUploadErrorWithReceipt};
 pub use payments::{MerklePaymentError, MerklePaymentReceipt};
 pub use upload::MerklePutError;

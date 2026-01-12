@@ -238,32 +238,48 @@ impl MerkleTree {
     /// Each candidate contains a proof that the midpoint belongs to the tree.
     /// Returns 2^ceil(depth/2) reward candidates.
     ///
+    /// Each `MidpointProof` includes the `leaf_addresses` that map to that midpoint.
+    /// These are the chunk addresses whose storing nodes must agree on the merkle candidates.
+    ///
     /// # Arguments
     ///
     /// * `merkle_payment_timestamp` - Unix timestamp of the transaction (seconds since epoch)
+    /// * `original_leaves` - The original leaf addresses used to build the tree
     ///
     /// # Returns
     ///
-    /// A vector of `RewardCandidatePool` or an error if proof generation fails
+    /// A vector of `MidpointProof` or an error if proof generation fails
     ///
     /// # Example
     ///
     /// ```ignore
-    /// let tree = MerkleTree::from_xornames(addresses)?;
+    /// let addresses: Vec<XorName> = vec![...];
+    /// let tree = MerkleTree::from_xornames(addresses.clone())?;
     /// let merkle_payment_timestamp = SystemTime::now()
     ///     .duration_since(UNIX_EPOCH)
     ///     .expect("Failed to get current time")
     ///     .as_secs();
     ///
-    /// let candidates = tree.reward_candidates(merkle_payment_timestamp)?;
+    /// let candidates = tree.reward_candidates(merkle_payment_timestamp, &addresses)?;
     ///
-    /// // Each candidate's branch can be verified independently
-    /// for candidate in candidates {
-    ///     assert!(candidate.branch.verify());
+    /// // Each candidate has the leaf addresses that map to it
+    /// for candidate in &candidates {
+    ///     println!("Midpoint covers {} leaves", candidate.leaf_addresses.len());
     /// }
     /// ```
-    pub fn reward_candidates(&self, merkle_payment_timestamp: u64) -> Result<Vec<MidpointProof>> {
+    pub fn reward_candidates(
+        &self,
+        merkle_payment_timestamp: u64,
+        original_leaves: &[XorName],
+    ) -> Result<Vec<MidpointProof>> {
         let midpoints = self.midpoints()?;
+        let num_midpoints = midpoints.len();
+
+        // Calculate padded leaf count (next power of 2)
+        let padded_leaf_count = 1usize << self.depth;
+
+        // Leaves per midpoint in the padded tree
+        let leaves_per_midpoint = padded_leaf_count / num_midpoints;
 
         midpoints
             .into_iter()
@@ -271,9 +287,26 @@ impl MerkleTree {
                 // Generate proof for this midpoint
                 let branch = self.generate_midpoint_proof(midpoint.index, midpoint.hash)?;
 
+                // Calculate which original leaves map to this midpoint
+                // Midpoint at index i covers padded leaves [i * leaves_per_midpoint, (i+1) * leaves_per_midpoint)
+                // But we only include actual leaves (not padding)
+                let start_leaf = midpoint.index * leaves_per_midpoint;
+                let end_leaf = (midpoint.index + 1) * leaves_per_midpoint;
+
+                let leaf_addresses: Vec<XorName> = (start_leaf..end_leaf)
+                    .filter_map(|leaf_idx| {
+                        if leaf_idx < original_leaves.len() {
+                            Some(original_leaves[leaf_idx])
+                        } else {
+                            None // This is a padding leaf
+                        }
+                    })
+                    .collect();
+
                 Ok(MidpointProof {
                     branch,
                     merkle_payment_timestamp,
+                    leaf_addresses,
                 })
             })
             .collect()
@@ -439,6 +472,12 @@ pub struct MidpointProof {
     /// Merkle payment timestamp provided by client (used to compute candidate address)
     /// This is the timestamp that all nodes in the pool must use for their quotes
     pub merkle_payment_timestamp: u64,
+
+    /// The leaf addresses (chunk addresses) that map to this midpoint.
+    /// These are the chunks whose storing nodes must agree on the merkle candidates.
+    /// Note: This is NOT included in the hash() computation as it's client-side metadata.
+    #[serde(default)]
+    pub leaf_addresses: Vec<XorName>,
 }
 
 impl MidpointProof {
@@ -899,9 +938,9 @@ mod tests {
     fn test_reward_candidate_pool_hash_fixed_width_encoding() {
         // Test that RewardCandidatePool::hash uses fixed-width encoding
         let leaves = make_test_leaves(16);
-        let tree = MerkleTree::from_xornames(leaves).unwrap();
+        let tree = MerkleTree::from_xornames(leaves.clone()).unwrap();
         let timestamp = 1234567890u64;
-        let pools = tree.reward_candidates(timestamp).unwrap();
+        let pools = tree.reward_candidates(timestamp, &leaves).unwrap();
         let pool = &pools[0];
 
         // Get the hash
@@ -936,9 +975,9 @@ mod tests {
     fn test_reward_candidate_pool_hash_architecture_independence() {
         // Create a pool with maximum usize values to test encoding
         let leaves = make_test_leaves(4);
-        let tree = MerkleTree::from_xornames(leaves).unwrap();
+        let tree = MerkleTree::from_xornames(leaves.clone()).unwrap();
         let timestamp = u64::MAX;
-        let pools = tree.reward_candidates(timestamp).unwrap();
+        let pools = tree.reward_candidates(timestamp, &leaves).unwrap();
 
         // Get hashes for all pools - they should be deterministic
         let hash1 = pools[0].hash();
@@ -1015,8 +1054,8 @@ mod tests {
     #[test]
     fn test_reward_candidate_pool_hash() {
         let leaves = make_test_leaves(16);
-        let tree = MerkleTree::from_xornames(leaves).unwrap();
-        let candidates = tree.reward_candidates(12345).unwrap();
+        let tree = MerkleTree::from_xornames(leaves.clone()).unwrap();
+        let candidates = tree.reward_candidates(12345, &leaves).unwrap();
 
         // Verify we can use RewardCandidatePool in a HashSet (tests std::hash::Hash trait)
         let mut seen = std::collections::HashSet::new();
@@ -1092,10 +1131,10 @@ mod tests {
     #[test]
     fn test_reward_candidates() {
         let leaves = make_test_leaves(256);
-        let tree = MerkleTree::from_xornames(leaves).unwrap();
+        let tree = MerkleTree::from_xornames(leaves.clone()).unwrap();
 
         let merkle_payment_timestamp = 1234567890u64;
-        let candidates = tree.reward_candidates(merkle_payment_timestamp).unwrap();
+        let candidates = tree.reward_candidates(merkle_payment_timestamp, &leaves).unwrap();
 
         // Should have same number as midpoints (2^4 = 16 for depth 8)
         assert_eq!(candidates.len(), 16);
@@ -1115,12 +1154,12 @@ mod tests {
         }
 
         // Verify deterministic - same timestamp gives same candidates
-        let candidates2 = tree.reward_candidates(merkle_payment_timestamp).unwrap();
+        let candidates2 = tree.reward_candidates(merkle_payment_timestamp, &leaves).unwrap();
         assert_eq!(candidates, candidates2);
 
         // Different timestamp gives different candidates
         let candidates3 = tree
-            .reward_candidates(merkle_payment_timestamp + 1)
+            .reward_candidates(merkle_payment_timestamp + 1, &leaves)
             .unwrap();
         assert_ne!(candidates[0].address(), candidates3[0].address());
 
@@ -1414,7 +1453,7 @@ mod tests {
         println!("✓ Transaction timestamp: {merkle_payment_timestamp}");
 
         // Get all reward candidates (this represents all candidate pools)
-        let candidates = tree.reward_candidates(merkle_payment_timestamp).unwrap();
+        let candidates = tree.reward_candidates(merkle_payment_timestamp, &addresses).unwrap();
         let midpoint_count = expected_reward_pools(depth);
         let level = midpoint_level(depth);
         let proof_depth = midpoint_proof_depth(depth);
@@ -1770,7 +1809,7 @@ mod tests {
             .unwrap()
             .as_secs();
 
-        let candidates = tree.reward_candidates(merkle_payment_timestamp).unwrap();
+        let candidates = tree.reward_candidates(merkle_payment_timestamp, &leaves).unwrap();
         let winner_pool_midpoint_proof = &candidates[0];
         let address_proof = tree.generate_address_proof(0, leaves[0]).unwrap();
         let root = tree.root();
@@ -1808,9 +1847,10 @@ mod tests {
         // Test 3: Winner proof root mismatch
         let mut wrong_winner = winner_pool_midpoint_proof.clone();
         // Create a different proof with wrong root
-        let wrong_tree = MerkleTree::from_xornames(make_test_leaves(16)).unwrap();
+        let wrong_leaves = make_test_leaves(16);
+        let wrong_tree = MerkleTree::from_xornames(wrong_leaves.clone()).unwrap();
         let wrong_candidates = wrong_tree
-            .reward_candidates(merkle_payment_timestamp)
+            .reward_candidates(merkle_payment_timestamp, &wrong_leaves)
             .unwrap();
         wrong_winner.branch = wrong_candidates[0].branch.clone();
 
@@ -1844,7 +1884,7 @@ mod tests {
 
         // Test 5: Payment expired
         let old_timestamp = merkle_payment_timestamp - MERKLE_PAYMENT_EXPIRATION - 1;
-        let old_candidates = tree.reward_candidates(old_timestamp).unwrap();
+        let old_candidates = tree.reward_candidates(old_timestamp, &leaves).unwrap();
         let result = verify_merkle_proof(
             &leaves[0],
             &address_proof,
@@ -1892,13 +1932,13 @@ mod tests {
     #[test]
     fn test_reward_candidate_pool_address() {
         let leaves = make_test_leaves(16);
-        let tree = MerkleTree::from_xornames(leaves).unwrap();
+        let tree = MerkleTree::from_xornames(leaves.clone()).unwrap();
 
         let timestamp1 = 12345u64;
         let timestamp2 = 67890u64;
 
-        let candidates1 = tree.reward_candidates(timestamp1).unwrap();
-        let candidates2 = tree.reward_candidates(timestamp2).unwrap();
+        let candidates1 = tree.reward_candidates(timestamp1, &leaves).unwrap();
+        let candidates2 = tree.reward_candidates(timestamp2, &leaves).unwrap();
 
         // Same tree, same candidate index, different timestamp = different address
         assert_ne!(candidates1[0].address(), candidates2[0].address());
