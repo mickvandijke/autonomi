@@ -222,6 +222,16 @@ pub struct MidpointConsensus {
     pub consensus_merkle_candidates: Vec<PeerId>,
 }
 
+/// Format candidates per storing node for error display
+fn format_candidates_per_node(candidates: &HashMap<PeerId, Vec<PeerId>>) -> String {
+    let mut lines = Vec::new();
+    for (storing_node, candidates) in candidates {
+        let candidate_strs: Vec<String> = candidates.iter().map(|p| format!("{p}")).collect();
+        lines.push(format!("  {storing_node}: [{}]", candidate_strs.join(", ")));
+    }
+    lines.join("\n")
+}
+
 /// Errors that can occur during candidate consensus
 #[derive(Debug, thiserror::Error)]
 pub enum CandidateConsensusError {
@@ -229,8 +239,12 @@ pub enum CandidateConsensusError {
     Network(#[from] NetworkError),
     #[error("No mutual triplet found for chunk {chunk_address:?}: queried {queried} peers but couldn't find 3 with mutual close group membership")]
     NoMutualTripletForChunk { chunk_address: XorName, queried: usize },
-    #[error("Insufficient candidate overlap across storing nodes: only {overlap} common candidates, need at least {required}")]
-    InsufficientOverlap { overlap: usize, required: usize },
+    #[error("Insufficient candidate overlap across storing nodes: only {overlap} common candidates, need at least {required}\nCandidates per storing node:\n{}", format_candidates_per_node(.candidates_per_node))]
+    InsufficientOverlap {
+        overlap: usize,
+        required: usize,
+        candidates_per_node: HashMap<PeerId, Vec<PeerId>>,
+    },
     #[error("Not enough storing node views: got {got}, needed at least {needed}")]
     InsufficientStoringNodeViews { got: usize, needed: usize },
     #[error("Not enough topology errors: got {got}, needed at least 3")]
@@ -587,6 +601,7 @@ impl Client {
             return Err(CandidateConsensusError::InsufficientOverlap {
                 overlap: intersection.len(),
                 required: MIN_OVERLAP_THRESHOLD,
+                candidates_per_node: merkle_views.clone(),
             });
         }
 
@@ -744,6 +759,11 @@ impl Client {
             return Err(CandidateConsensusError::InsufficientOverlap {
                 overlap: consensus_size,
                 required: CANDIDATES_PER_POOL,
+                candidates_per_node: self.get_candidates_per_node_from_selection(
+                    chunk_views,
+                    chunk_valid_triplets,
+                    &current_selection,
+                ),
             });
         }
 
@@ -779,9 +799,11 @@ impl Client {
         }
 
         // No valid combination found with any triplet for this chunk
+        // Show ALL queried nodes' candidates for debugging
         Err(CandidateConsensusError::InsufficientOverlap {
             overlap: 0,
             required: CANDIDATES_PER_POOL,
+            candidates_per_node: self.get_all_candidates_per_node(chunk_views),
         })
     }
 
@@ -815,6 +837,45 @@ impl Client {
         }
 
         intersection.map(|s| s.len()).unwrap_or(0)
+    }
+
+    /// Extract candidates per storing node from a selection of triplets.
+    fn get_candidates_per_node_from_selection(
+        &self,
+        chunk_views: &[(XorName, Vec<StoringNodeMerkleView>)],
+        chunk_valid_triplets: &[(XorName, Vec<ValidTriplet>)],
+        selection: &[usize],
+    ) -> HashMap<PeerId, Vec<PeerId>> {
+        let mut result = HashMap::new();
+
+        for (chunk_idx, &triplet_idx) in selection.iter().enumerate() {
+            let (_, views) = &chunk_views[chunk_idx];
+            let (_, valid_triplets) = &chunk_valid_triplets[chunk_idx];
+            let triplet = &valid_triplets[triplet_idx];
+
+            for &view_idx in &triplet.indices {
+                let view = &views[view_idx];
+                result.insert(view.storing_node_id, view.merkle_candidates_view.clone());
+            }
+        }
+
+        result
+    }
+
+    /// Extract candidates per storing node from ALL queried nodes (not just those in a selection).
+    fn get_all_candidates_per_node(
+        &self,
+        chunk_views: &[(XorName, Vec<StoringNodeMerkleView>)],
+    ) -> HashMap<PeerId, Vec<PeerId>> {
+        let mut result = HashMap::new();
+
+        for (_, views) in chunk_views {
+            for view in views {
+                result.insert(view.storing_node_id, view.merkle_candidates_view.clone());
+            }
+        }
+
+        result
     }
 
     /// Find consensus from collected TopologyVerificationFailed errors.
