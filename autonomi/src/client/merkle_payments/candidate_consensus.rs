@@ -78,12 +78,13 @@
 
 use crate::Client;
 use crate::networking::NetworkError;
+use ant_evm::EvmWallet;
 use ant_evm::merkle_payments::CANDIDATES_PER_POOL;
 use ant_protocol::NetworkAddress;
 use ant_protocol::storage::ChunkAddress;
 use libp2p::{Multiaddr, PeerId};
 use std::collections::{HashMap, HashSet};
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 use xor_name::XorName;
 
 /// Number of storing nodes to query per chunk when looking for mutual triplets
@@ -970,6 +971,196 @@ impl Client {
         );
 
         Ok(consensus)
+    }
+
+    /// Probe storing nodes for their merkle candidate views by triggering topology verification.
+    ///
+    /// This method makes an actual merkle payment for the given chunk addresses and attempts
+    /// to upload to storing nodes. The nodes will perform network lookups for closest peers
+    /// to the midpoint and return `TopologyVerificationFailed` errors if the paid candidates
+    /// don't match their views. We extract `node_peers` from those errors.
+    ///
+    /// **CRITICAL**: The chunk_addresses must be the SAME addresses that will be used in
+    /// the actual upload, so the midpoint address is identical. Otherwise the merkle
+    /// candidates returned will be for a different address space.
+    ///
+    /// This is the **only reliable way** to get nodes' actual network-lookup-based
+    /// view of merkle candidates, since `GetClosestPeers` only returns routing table data.
+    ///
+    /// # Arguments
+    /// * `chunk_addresses` - The actual chunk addresses for the merkle tree (MUST match real upload)
+    /// * `chunks` - The actual chunks to upload (used to trigger topology verification)
+    /// * `wallet` - Wallet for making the merkle payment
+    ///
+    /// # Returns
+    /// * `TopologyErrorCollection` containing merkle candidate views from actual network lookups
+    /// * `MerklePaymentReceipt` - the receipt from the payment (can be reused if candidates match)
+    pub async fn probe_merkle_candidates_with_payment(
+        &self,
+        chunk_addresses: Vec<XorName>,
+        chunks: Vec<ant_protocol::storage::Chunk>,
+        wallet: &EvmWallet,
+    ) -> Result<(TopologyErrorCollection, super::payments::MerklePaymentReceipt), CandidateConsensusError> {
+        use super::payments::MerklePaymentError;
+        use ant_protocol::storage::{DataTypes, RecordKind, try_serialize_record};
+        use libp2p::kad::Record;
+
+        if chunks.is_empty() || chunk_addresses.is_empty() {
+            return Err(CandidateConsensusError::InsufficientStoringNodeViews {
+                got: 0,
+                needed: 1,
+            });
+        }
+
+        info!(
+            "Probing merkle candidates with payment for {} chunks",
+            chunk_addresses.len()
+        );
+
+        // Get a representative chunk size
+        let data_size = chunks.first().map(|c| c.value().len()).unwrap_or(0);
+
+        // Make the merkle payment using the ACTUAL chunk addresses
+        // This ensures the midpoint is the same as the real upload
+        let receipt = match self
+            .pay_for_merkle_batch(DataTypes::Chunk, chunk_addresses.clone().into_iter(), data_size, wallet)
+            .await
+        {
+            Ok(receipt) => receipt,
+            Err(MerklePaymentError::InsufficientCandidates { got, needed }) => {
+                warn!(
+                    "Insufficient candidates for probe payment: got {}, needed {}",
+                    got, needed
+                );
+                return Err(CandidateConsensusError::InsufficientStoringNodeViews {
+                    got,
+                    needed,
+                });
+            }
+            Err(e) => {
+                error!("Failed to make probe payment: {e}");
+                return Err(CandidateConsensusError::Network(NetworkError::GetRecordError(
+                    format!("Probe payment failed: {e}"),
+                )));
+            }
+        };
+
+        let mut topology_errors = TopologyErrorCollection::new();
+
+        // Try to upload each chunk to its storing nodes
+        // We want to collect TopologyVerificationFailed errors from as many nodes as possible
+        for chunk in &chunks {
+            let chunk_addr = *chunk.name();
+
+            // Get the proof for this chunk
+            let proof = match receipt.proofs.get(&chunk_addr) {
+                Some(p) => p,
+                None => {
+                    warn!("No proof found for chunk {:?}, skipping", chunk_addr);
+                    continue;
+                }
+            };
+
+            // Get storing nodes for this chunk
+            let network_addr = NetworkAddress::from(*chunk.address());
+            let storing_nodes = match self
+                .network
+                .get_closest_peers(network_addr.clone(), Some(STORING_NODES_TO_QUERY_PER_CHUNK))
+                .await
+            {
+                Ok(nodes) => nodes,
+                Err(e) => {
+                    warn!("Failed to get storing nodes for chunk {:?}: {e}", chunk_addr);
+                    continue;
+                }
+            };
+
+            // Create the record
+            let record_kind = RecordKind::DataWithMerklePayment(DataTypes::Chunk);
+            let record_value = match try_serialize_record(&(proof.clone(), chunk.clone()), record_kind) {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!("Failed to serialize chunk {:?}: {e:?}", chunk_addr);
+                    continue;
+                }
+            };
+
+            let record = Record {
+                key: network_addr.to_record_key(),
+                value: record_value.to_vec(),
+                publisher: None,
+                expires: None,
+            };
+
+            // Try to upload to each storing node individually to collect errors
+            for storing_node in &storing_nodes {
+                debug!(
+                    "Sending chunk {:?} to node {:?} to trigger topology verification",
+                    chunk_addr, storing_node.peer_id
+                );
+
+                let result = self
+                    .network
+                    .put_record(record.clone(), vec![storing_node.clone()], crate::networking::Quorum::One)
+                    .await;
+
+                match result {
+                    Ok(()) => {
+                        debug!(
+                            "Upload succeeded for node {:?} - routing table view was accurate",
+                            storing_node.peer_id
+                        );
+                    }
+                    Err(NetworkError::TopologyVerificationFailed {
+                        rejecting_node,
+                        target_address,
+                        valid_count,
+                        total_paid,
+                        closest_count,
+                        node_peers,
+                        paid_peers,
+                    }) => {
+                        info!(
+                            "Got topology error from node {:?} with {} merkle candidates",
+                            rejecting_node,
+                            node_peers.len()
+                        );
+                        topology_errors.add(TopologyErrorInfo {
+                            rejecting_node,
+                            target_address,
+                            valid_count,
+                            total_paid,
+                            closest_count,
+                            node_peers,
+                            paid_peers,
+                        });
+                    }
+                    Err(e) => {
+                        debug!(
+                            "Upload to node {:?} failed with non-topology error: {e}",
+                            storing_node.peer_id
+                        );
+                    }
+                }
+
+                // If we've collected enough errors, we can stop early
+                if topology_errors.len() >= 3 {
+                    break;
+                }
+            }
+
+            // If we've collected enough errors from this chunk's nodes, move on
+            if topology_errors.len() >= 5 {
+                break;
+            }
+        }
+
+        info!(
+            "Collected {} topology errors from probe uploads",
+            topology_errors.len()
+        );
+
+        Ok((topology_errors, receipt))
     }
 
     // Backward compatibility wrapper - deprecated
