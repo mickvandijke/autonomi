@@ -35,6 +35,7 @@ use futures::stream::FuturesUnordered;
 use libp2p::PeerId;
 use libp2p::kad::{PeerInfo, Record};
 use std::collections::HashMap;
+use std::num::NonZero;
 use tracing::{debug, info, warn};
 use xor_name::XorName;
 
@@ -125,14 +126,16 @@ impl Client {
                 NetworkAddress::ChunkAddress(ChunkAddress::new(*chunk_address));
             let storing_nodes = self
                 .network
-                .get_closest_peers_with_retries(
+                .get_closest_n_peers(
                     chunk_network_addr.clone(),
-                    Some(CLOSE_GROUP_SIZE),
+                    NonZero::new(CLOSE_GROUP_SIZE).expect("CLOSE_GROUP_SIZE is non-zero"),
                 )
                 .await?;
 
             for peer_info in storing_nodes {
-                all_storing_nodes.entry(peer_info.peer_id).or_insert(peer_info);
+                all_storing_nodes
+                    .entry(peer_info.peer_id)
+                    .or_insert(peer_info);
             }
         }
 
@@ -148,20 +151,19 @@ impl Client {
             chunk_addresses.len()
         );
 
-        // Step 2: Get nodes close to midpoint to use as probe candidates
-        let midpoint_network_addr =
-            NetworkAddress::ChunkAddress(ChunkAddress::new(midpoint_address));
-        let midpoint_closest = self
-            .network
-            .get_closest_peers_with_retries(midpoint_network_addr.clone(), Some(CLOSE_GROUP_SIZE))
-            .await?;
+        // todo: remove later
+        println!(
+            "Found {} unique storing nodes across {} chunks for midpoint {midpoint_address:?}",
+            storing_nodes.len(),
+            chunk_addresses.len()
+        );
 
-        if midpoint_closest.len() < CANDIDATES_PER_POOL {
-            return Err(ConsensusError::InsufficientResponses {
-                got: midpoint_closest.len(),
-                needed: CANDIDATES_PER_POOL,
-            });
-        }
+        // Step 2: Re-use storing nodes as probe candidates
+        let midpoint_closest: Vec<PeerInfo> = storing_nodes
+            .iter()
+            .take(CANDIDATES_PER_POOL)
+            .cloned()
+            .collect();
 
         // Step 3: Create probe candidate nodes by getting actual quotes from nodes close to midpoint
         let probe_candidates = self
