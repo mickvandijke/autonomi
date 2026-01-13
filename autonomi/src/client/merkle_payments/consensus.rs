@@ -25,17 +25,20 @@
 use crate::Client;
 use crate::networking::NetworkError;
 use ant_evm::merkle_payments::{
-    CANDIDATES_PER_POOL, MerkleBranch, MerklePaymentCandidateNode, MerklePaymentCandidatePool,
+    CANDIDATES_PER_POOL, MerklePaymentCandidateNode, MerklePaymentCandidatePool,
     MerklePaymentProof, MerkleTree, MidpointProof,
 };
+use ant_evm::{AttoTokens, EvmWallet};
 use ant_protocol::storage::{Chunk, ChunkAddress, DataTypes, RecordKind, try_serialize_record};
 use ant_protocol::{CLOSE_GROUP_SIZE, NetworkAddress};
+use evmlib::merkle_batch_payment::PoolCommitment;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use libp2p::PeerId;
 use libp2p::kad::{PeerInfo, Record};
 use std::collections::HashMap;
 use std::num::NonZero;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
 use xor_name::XorName;
 
@@ -56,6 +59,10 @@ pub enum ConsensusError {
     Serialization(String),
     #[error("Merkle tree error: {0}")]
     MerkleTree(String),
+    #[error("Wallet error: {0}")]
+    Wallet(String),
+    #[error("Failed to get timestamp: {0}")]
+    Timestamp(#[from] std::time::SystemTimeError),
 }
 
 /// Information about a node's view of network topology for a midpoint
@@ -94,25 +101,29 @@ impl Client {
     ///
     /// This collects topology views from ALL storing nodes across ALL chunks
     /// that map to the same midpoint. Each storing node is probed with a record
-    /// containing actual chunk data (required for content-addressed validation).
+    /// containing actual chunk data and a PAID merkle proof.
+    ///
+    /// The probing payment is a small merkle tree payment that allows nodes to
+    /// validate the proof and return their topology view (via TopologyVerificationFailed).
     ///
     /// # Arguments
     /// * `chunks` - All chunks that map to this midpoint (with actual data)
-    /// * `midpoint_proof` - The midpoint proof for the merkle tree
+    /// * `midpoint_proof` - The midpoint proof for the main merkle tree
     /// * `data_type` - The data type being uploaded
     /// * `data_size` - The data size for quotes
+    /// * `wallet` - The wallet to pay for probing
     ///
     /// # Returns
-    /// * Vector of TopologyView from all unique storing nodes
+    /// * (topology_views, probe_cost) - Topology views from storing nodes and cost of probing
     pub(crate) async fn probe_all_storing_nodes_for_topology(
         &self,
         chunks: &[Chunk],
         midpoint_proof: &MidpointProof,
         data_type: DataTypes,
         data_size: usize,
-    ) -> Result<Vec<TopologyView>, ConsensusError> {
+        wallet: &EvmWallet,
+    ) -> Result<(Vec<TopologyView>, AttoTokens), ConsensusError> {
         let midpoint_address = midpoint_proof.address();
-        let merkle_payment_timestamp = midpoint_proof.merkle_payment_timestamp;
 
         info!(
             "Probing storing nodes from {} chunks for midpoint {midpoint_address:?}",
@@ -120,10 +131,10 @@ impl Client {
         );
 
         // Step 1: Collect storing nodes from ALL chunks, tracking which chunk they're responsible for
-        // HashMap from PeerId -> (PeerInfo, chunk they're responsible for)
-        let mut storing_node_to_chunk: HashMap<PeerId, (PeerInfo, Chunk)> = HashMap::new();
+        // HashMap from PeerId -> (PeerInfo, chunk they're responsible for, leaf_index)
+        let mut storing_node_to_chunk: HashMap<PeerId, (PeerInfo, Chunk, usize)> = HashMap::new();
 
-        for chunk in chunks {
+        for (leaf_index, chunk) in chunks.iter().enumerate() {
             let chunk_network_addr = NetworkAddress::ChunkAddress(*chunk.address());
             let storing_nodes = self
                 .network
@@ -135,9 +146,11 @@ impl Client {
 
             for peer_info in storing_nodes {
                 // Only insert if not already present (keep the first chunk they were found for)
-                storing_node_to_chunk
-                    .entry(peer_info.peer_id)
-                    .or_insert((peer_info, chunk.clone()));
+                storing_node_to_chunk.entry(peer_info.peer_id).or_insert((
+                    peer_info,
+                    chunk.clone(),
+                    leaf_index,
+                ));
             }
         }
 
@@ -151,45 +164,117 @@ impl Client {
             chunks.len()
         );
 
-        // Step 2: Re-use storing nodes as probe candidates
+        // Step 2: Build a probe merkle tree from the chunks
+        let addresses: Vec<XorName> = chunks.iter().map(|c| *c.name()).collect();
+
+        // Pad to minimum 2 leaves if only 1 chunk
+        let (addresses, _chunks_padded) = if addresses.len() == 1 {
+            (
+                vec![addresses[0], addresses[0]],
+                vec![chunks[0].clone(), chunks[0].clone()],
+            )
+        } else {
+            (addresses, chunks.to_vec())
+        };
+
+        let probe_tree = MerkleTree::from_xornames(addresses.clone())
+            .map_err(|e| ConsensusError::MerkleTree(format!("Failed to build probe tree: {e}")))?;
+        let probe_depth = probe_tree.depth();
+
+        // Step 3: Get timestamp and initial candidate pools for probe tree
+        let probe_timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()
+            - Duration::from_mins(10).as_secs();
+        let probe_midpoint_proofs = probe_tree.reward_candidates(probe_timestamp).map_err(|e| {
+            ConsensusError::MerkleTree(format!("Failed to get probe midpoint proofs: {e}"))
+        })?;
+
+        // Step 4: Get initial candidate pools using non-consensus approach
+
+        // Use known nodes as probing merkle candidate nodes
         let midpoint_closest: Vec<PeerInfo> = storing_node_to_chunk
             .values()
-            .map(|(pi, _)| pi)
+            .map(|(pi, _, _)| pi)
             .take(CANDIDATES_PER_POOL)
             .cloned()
             .collect();
 
-        // Step 3: Create probe candidate nodes by getting actual quotes from nodes close to midpoint
-        let probe_candidates = self
-            .create_probe_candidates(
-                &midpoint_closest,
-                midpoint_address,
-                data_type,
-                data_size,
-                merkle_payment_timestamp,
-            )
-            .await?;
+        let mut probe_candidate_pools = Vec::with_capacity(probe_midpoint_proofs.len());
+        for probe_mp in &probe_midpoint_proofs {
+            let pool = self
+                .build_initial_candidate_pool(
+                    midpoint_closest.clone(),
+                    probe_mp.clone(),
+                    data_type,
+                    data_size,
+                )
+                .await?;
+            probe_candidate_pools.push(pool);
+        }
 
-        // Step 4: Create probe merkle proof pool (same for all probes)
-        let probe_pool = MerklePaymentCandidatePool {
-            midpoint_proof: midpoint_proof.clone(),
-            candidate_nodes: probe_candidates,
-        };
+        // Step 5: Pay for the probe tree
+        let pool_commitments: Vec<PoolCommitment> = probe_candidate_pools
+            .iter()
+            .map(|pool| pool.to_commitment())
+            .collect();
 
-        // Step 5: Probe each storing node with actual chunk data
+        debug!(
+            "Paying for probe tree with {} pools",
+            pool_commitments.len()
+        );
+        let lock_guard = wallet.lock().await;
+        let (winner_pool_hash, probe_amount) = wallet
+            .pay_for_merkle_tree(probe_depth, pool_commitments, probe_timestamp)
+            .await
+            .map_err(|e| ConsensusError::Wallet(format!("Failed to pay for probe tree: {e}")))?;
+        let probe_cost = AttoTokens::from_atto(probe_amount);
+        drop(lock_guard);
+
+        info!("Probe payment submitted, winner pool: {winner_pool_hash:?}, cost: {probe_cost}");
+
+        // Step 6: Find winner pool and generate proofs
+        let winner_pool = probe_candidate_pools
+            .into_iter()
+            .find(|pool| pool.hash() == winner_pool_hash)
+            .ok_or_else(|| {
+                ConsensusError::Wallet(format!(
+                    "Probe payment returned invalid pool hash: {}",
+                    hex::encode(winner_pool_hash)
+                ))
+            })?;
+
+        // Generate proofs for each chunk
+        let mut chunk_proofs: HashMap<XorName, MerklePaymentProof> = HashMap::new();
+        for (i, address) in addresses.iter().enumerate() {
+            let address_proof = probe_tree
+                .generate_address_proof(i, *address)
+                .map_err(|e| {
+                    ConsensusError::MerkleTree(format!(
+                        "Failed to generate probe address proof: {e}"
+                    ))
+                })?;
+            let payment_proof = MerklePaymentProof {
+                address: *address,
+                data_proof: address_proof,
+                winner_pool: winner_pool.clone(),
+            };
+            chunk_proofs.insert(*address, payment_proof);
+        }
+
+        // Step 7: Probe each storing node with paid proofs
         let mut topology_views = Vec::new();
         let mut tasks = FuturesUnordered::new();
         let record_kind = RecordKind::DataWithMerklePayment(data_type);
 
-        for (peer_id, (peer_info, chunk)) in storing_node_to_chunk {
-            // Create a probe record with actual chunk data (content-addressed validation)
+        for (peer_id, (peer_info, chunk, _leaf_index)) in storing_node_to_chunk {
             let chunk_address = *chunk.name();
             let chunk_network_addr = NetworkAddress::ChunkAddress(*chunk.address());
-            let probe_proof = MerklePaymentProof {
-                address: chunk_address,
-                data_proof: create_dummy_merkle_branch(chunk_address)?,
-                winner_pool: probe_pool.clone(),
-            };
+
+            // Use the paid proof for this chunk
+            let probe_proof = chunk_proofs.get(&chunk_address).cloned().ok_or_else(|| {
+                ConsensusError::Serialization(format!(
+                    "Missing probe proof for chunk {chunk_address:?}"
+                ))
+            })?;
 
             let record = Record {
                 key: chunk_network_addr.to_record_key(),
@@ -238,7 +323,44 @@ impl Client {
             return Err(ConsensusError::InsufficientResponses { got: 0, needed: 1 });
         }
 
-        Ok(topology_views)
+        Ok((topology_views, probe_cost))
+    }
+
+    /// Build an initial (non-consensus) candidate pool for a midpoint.
+    ///
+    /// This is used for probe payments before we have consensus.
+    async fn build_initial_candidate_pool(
+        &self,
+        closest: Vec<PeerInfo>,
+        midpoint_proof: MidpointProof,
+        data_type: DataTypes,
+        data_size: usize,
+    ) -> Result<MerklePaymentCandidatePool, ConsensusError> {
+        let midpoint_address = midpoint_proof.address();
+        let merkle_payment_timestamp = midpoint_proof.merkle_payment_timestamp;
+
+        if closest.len() < CANDIDATES_PER_POOL {
+            return Err(ConsensusError::InsufficientResponses {
+                got: closest.len(),
+                needed: CANDIDATES_PER_POOL,
+            });
+        }
+
+        // Get quotes from closest nodes
+        let candidates = self
+            .create_probe_candidates(
+                &closest,
+                midpoint_address,
+                data_type,
+                data_size,
+                merkle_payment_timestamp,
+            )
+            .await?;
+
+        Ok(MerklePaymentCandidatePool {
+            midpoint_proof,
+            candidate_nodes: candidates,
+        })
     }
 
     /// Build consensus candidates from multiple topology views.
@@ -470,9 +592,10 @@ impl Client {
     /// * `depth` - Tree depth
     /// * `data_type` - The data type being uploaded
     /// * `data_size` - The data size
+    /// * `wallet` - The wallet for paying for probes
     ///
     /// # Returns
-    /// * MerklePaymentCandidatePool with consensus-selected candidates
+    /// * (MerklePaymentCandidatePool, probe_cost) - Pool with consensus candidates and probe cost
     pub(crate) async fn build_consensus_candidate_pool(
         &self,
         midpoint_proof: MidpointProof,
@@ -481,7 +604,8 @@ impl Client {
         depth: u8,
         data_type: DataTypes,
         data_size: usize,
-    ) -> Result<MerklePaymentCandidatePool, ConsensusError> {
+        wallet: &EvmWallet,
+    ) -> Result<(MerklePaymentCandidatePool, AttoTokens), ConsensusError> {
         let midpoint_address = midpoint_proof.address();
         let merkle_payment_timestamp = midpoint_proof.merkle_payment_timestamp;
 
@@ -507,13 +631,14 @@ impl Client {
         );
 
         // Step 1: Probe storing nodes from ALL chunks that map to this midpoint
-        // Collect topology views from all storing nodes
-        let topology_views = self
+        // Collect topology views from all storing nodes (this pays for probing)
+        let (topology_views, probe_cost) = self
             .probe_all_storing_nodes_for_topology(
                 &chunks_for_midpoint,
                 &midpoint_proof,
                 data_type,
                 data_size,
+                wallet,
             )
             .await?;
 
@@ -538,14 +663,17 @@ impl Client {
         };
 
         info!(
-            "Built consensus candidate pool for midpoint {midpoint_index} with {} candidates",
+            "Built consensus candidate pool for midpoint {midpoint_index} with {} candidates, probe cost: {probe_cost}",
             CANDIDATES_PER_POOL
         );
 
-        Ok(pool)
+        Ok((pool, probe_cost))
     }
 
-    /// Build consensus-based candidate pools for all midpoints (in parallel).
+    /// Build consensus-based candidate pools for all midpoints (sequentially to avoid wallet contention).
+    ///
+    /// Note: Probing requires on-chain payments, so we process midpoints sequentially
+    /// to avoid wallet locking issues. The wallet uses an async mutex internally.
     ///
     /// # Arguments
     /// * `midpoint_proofs` - The midpoint proofs from the merkle tree
@@ -553,9 +681,10 @@ impl Client {
     /// * `depth` - Tree depth
     /// * `data_type` - Data type for all items in batch
     /// * `data_size` - The per-record data size
+    /// * `wallet` - The wallet for paying for probes
     ///
     /// # Returns
-    /// * Vector of MerklePaymentCandidatePool, one for each midpoint
+    /// * (pools, total_probe_cost) - Vector of pools and total cost for probing
     pub(crate) async fn build_consensus_candidate_pools(
         &self,
         midpoint_proofs: Vec<MidpointProof>,
@@ -563,53 +692,46 @@ impl Client {
         depth: u8,
         data_type: DataTypes,
         data_size: usize,
-    ) -> Result<Vec<MerklePaymentCandidatePool>, ConsensusError> {
+        wallet: &EvmWallet,
+    ) -> Result<(Vec<MerklePaymentCandidatePool>, AttoTokens), ConsensusError> {
         info!(
             "Building consensus candidate pools for {} midpoints from {} chunks",
             midpoint_proofs.len(),
             chunks.len()
         );
 
-        // Build all pools in parallel
-        let pool_futures =
-            midpoint_proofs
-                .into_iter()
-                .enumerate()
-                .map(|(midpoint_index, proof)| {
-                    let client = self.clone();
-                    let chunks = chunks.to_vec();
-                    async move {
-                        client
-                            .build_consensus_candidate_pool(
-                                proof,
-                                midpoint_index,
-                                &chunks,
-                                depth,
-                                data_type,
-                                data_size,
-                            )
-                            .await
-                    }
-                });
+        // Build pools sequentially to avoid wallet contention
+        // Each probe payment requires the wallet lock
+        let mut pools = Vec::with_capacity(midpoint_proofs.len());
+        let mut total_probe_cost = AttoTokens::zero();
 
-        let pools: Vec<MerklePaymentCandidatePool> =
-            futures::future::try_join_all(pool_futures).await?;
+        for (midpoint_index, proof) in midpoint_proofs.into_iter().enumerate() {
+            let (pool, probe_cost) = self
+                .build_consensus_candidate_pool(
+                    proof,
+                    midpoint_index,
+                    chunks,
+                    depth,
+                    data_type,
+                    data_size,
+                    wallet,
+                )
+                .await?;
+            pools.push(pool);
+            total_probe_cost = AttoTokens::from_atto(
+                total_probe_cost
+                    .as_atto()
+                    .saturating_add(probe_cost.as_atto()),
+            );
+        }
 
-        info!("Built {} consensus candidate pools", pools.len());
+        info!(
+            "Built {} consensus candidate pools, total probe cost: {total_probe_cost}",
+            pools.len()
+        );
 
-        Ok(pools)
+        Ok((pools, total_probe_cost))
     }
-}
-
-/// Create a dummy merkle branch for probing.
-fn create_dummy_merkle_branch(address: XorName) -> Result<MerkleBranch, ConsensusError> {
-    let addresses = vec![address, XorName::from_content(b"dummy_padding")];
-
-    let tree = MerkleTree::from_xornames(addresses.clone())
-        .map_err(|e| ConsensusError::MerkleTree(format!("Failed to create dummy tree: {e}")))?;
-
-    tree.generate_address_proof(0, addresses[0])
-        .map_err(|e| ConsensusError::MerkleTree(format!("Failed to generate dummy proof: {e}")))
 }
 
 #[cfg(test)]

@@ -10,9 +10,7 @@ use super::consensus::ConsensusError;
 use crate::{Client, networking::NetworkError};
 use ant_evm::{
     AttoTokens, EvmWallet,
-    merkle_payments::{
-        MAX_LEAVES, MerklePaymentCandidatePool, MerklePaymentProof, MerkleTree,
-    },
+    merkle_payments::{MAX_LEAVES, MerklePaymentCandidatePool, MerklePaymentProof, MerkleTree},
 };
 use ant_protocol::storage::{Chunk, DataTypes};
 use evmlib::merkle_batch_payment::PoolCommitment;
@@ -237,7 +235,11 @@ impl Client {
         data_type: DataTypes,
         data_size: usize,
         merkle_payment_timestamp: u64,
-    ) -> Result<[ant_evm::merkle_payments::MerklePaymentCandidateNode; ant_evm::merkle_payments::CANDIDATES_PER_POOL], MerklePaymentError> {
+    ) -> Result<
+        [ant_evm::merkle_payments::MerklePaymentCandidateNode;
+            ant_evm::merkle_payments::CANDIDATES_PER_POOL],
+        MerklePaymentError,
+    > {
         use ant_protocol::storage::ChunkAddress;
         use futures::StreamExt;
         use futures::stream::FuturesUnordered;
@@ -247,7 +249,10 @@ impl Client {
         let data_type_index = data_type.get_index();
 
         let mut tasks = FuturesUnordered::new();
-        for peer_info in peers.iter().take(ant_evm::merkle_payments::CANDIDATES_PER_POOL + 4) {
+        for peer_info in peers
+            .iter()
+            .take(ant_evm::merkle_payments::CANDIDATES_PER_POOL + 4)
+        {
             let network = self.network.clone();
             let network_addr = network_addr.clone();
             let peer_info = peer_info.clone();
@@ -276,7 +281,7 @@ impl Client {
         }
 
         candidates.try_into().map_err(|v: Vec<_>| {
-            MerklePaymentError::Consensus(super::consensus::ConsensusError::InsufficientResponses {
+            MerklePaymentError::Consensus(ConsensusError::InsufficientResponses {
                 got: v.len(),
                 needed: ant_evm::merkle_payments::CANDIDATES_PER_POOL,
             })
@@ -288,18 +293,23 @@ impl Client {
     /// This uses consensus-based merkle candidate selection where storing nodes
     /// must agree on the merkle candidates for each midpoint before payment.
     ///
-    /// Returns (tree, candidate_pools, pool_commitments, timestamp)
+    /// Probing for consensus requires on-chain payments. The probe cost is returned
+    /// separately so it can be included in the total amount paid.
+    ///
+    /// Returns (tree, candidate_pools, pool_commitments, timestamp, probe_cost)
     pub(crate) async fn prepare_merkle_batch(
         &self,
         data_type: DataTypes,
         chunks: Vec<Chunk>,
         data_size: usize,
+        wallet: &EvmWallet,
     ) -> Result<
         (
             MerkleTree,
             Vec<MerklePaymentCandidatePool>,
             Vec<PoolCommitment>,
             u64,
+            AttoTokens,
         ),
         MerklePaymentError,
     > {
@@ -316,7 +326,10 @@ impl Client {
         // Only the proof at index 0 is used (in pay_for_single_merkle_batch the original addresses
         // vector is used for proof generation, which has only 1 element).
         let (addresses, chunks) = match addresses[..] {
-            [only_one] => (vec![only_one, only_one], vec![chunks[0].clone(), chunks[0].clone()]),
+            [only_one] => (
+                vec![only_one, only_one],
+                vec![chunks[0].clone(), chunks[0].clone()],
+            ),
             _ => (addresses, chunks),
         };
 
@@ -332,12 +345,20 @@ impl Client {
 
         // Build consensus-based candidate pools
         // This probes storing nodes (close to chunk addresses) to get their topology views
-        // of merkle candidates (close to midpoint addresses) and builds consensus
-        let candidate_pools = self
-            .build_consensus_candidate_pools(midpoint_proofs, &chunks, depth, data_type, data_size)
+        // of merkle candidates (close to midpoint addresses) and builds consensus.
+        // Probing requires on-chain payments which are included in probe_cost.
+        let (candidate_pools, probe_cost) = self
+            .build_consensus_candidate_pools(
+                midpoint_proofs,
+                &chunks,
+                depth,
+                data_type,
+                data_size,
+                wallet,
+            )
             .await?;
         info!(
-            "Built {} consensus-based candidate pools",
+            "Built {} consensus-based candidate pools, probe cost: {probe_cost}",
             candidate_pools.len()
         );
 
@@ -352,10 +373,13 @@ impl Client {
             candidate_pools,
             pool_commitments,
             merkle_payment_timestamp,
+            probe_cost,
         ))
     }
 
     /// Pay for a single batch of up to MAX_LEAVES chunks
+    ///
+    /// This includes both the probe cost (for consensus discovery) and the main payment.
     pub(crate) async fn pay_for_single_merkle_batch(
         &self,
         data_type: DataTypes,
@@ -367,23 +391,30 @@ impl Client {
         let addresses: Vec<XorName> = chunks.iter().map(|c| *c.name()).collect();
 
         // Prepare the batch (build tree, query pools with actual chunks for consensus)
-        let (tree, candidate_pools, pool_commitments, merkle_payment_timestamp) = self
-            .prepare_merkle_batch(data_type, chunks, data_size)
+        // This includes paid probing for consensus discovery
+        let (tree, candidate_pools, pool_commitments, merkle_payment_timestamp, probe_cost) = self
+            .prepare_merkle_batch(data_type, chunks, data_size, wallet)
             .await?;
         let depth = tree.depth();
 
-        // Submit payment to smart contract
+        // Submit main payment to smart contract
         debug!("Waiting for wallet lock");
         let lock_guard = wallet.lock().await;
         debug!("Locked wallet");
-        let (winner_pool_hash, amount) = wallet
+        let (winner_pool_hash, main_amount) = wallet
             .pay_for_merkle_tree(depth, pool_commitments, merkle_payment_timestamp)
             .await?;
-        let amount = AttoTokens::from_atto(amount);
+        let main_amount = AttoTokens::from_atto(main_amount);
         drop(lock_guard);
         debug!("Unlocked wallet");
 
-        info!("Payment submitted, winner pool: {winner_pool_hash:?}, amount: {amount}");
+        // Total amount = probe cost + main payment
+        let total_amount =
+            AttoTokens::from_atto(probe_cost.as_atto().saturating_add(main_amount.as_atto()));
+
+        info!(
+            "Payment submitted, winner pool: {winner_pool_hash:?}, main: {main_amount}, probe: {probe_cost}, total: {total_amount}"
+        );
 
         // Find winner pool and generate proofs
         let winner_pool = candidate_pools
@@ -410,11 +441,11 @@ impl Client {
         let receipt = MerklePaymentReceipt {
             proofs,
             file_chunk_counts: HashMap::new(),
-            amount_paid: amount,
+            amount_paid: total_amount,
         };
 
         info!(
-            "Generated {} Merkle payment proofs, total amount: {amount}",
+            "Generated {} Merkle payment proofs, total amount: {total_amount}",
             receipt.proofs.len()
         );
         Ok(receipt)
