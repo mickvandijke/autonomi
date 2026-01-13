@@ -128,7 +128,7 @@ impl Client {
                 .network
                 .get_closest_n_peers(
                     chunk_network_addr.clone(),
-                    NonZero::new(CLOSE_GROUP_SIZE).expect("CLOSE_GROUP_SIZE is non-zero"),
+                    NonZero::new(CLOSE_GROUP_SIZE + 2).expect("CLOSE_GROUP_SIZE is non-zero"),
                 )
                 .await?;
 
