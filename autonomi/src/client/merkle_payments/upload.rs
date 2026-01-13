@@ -23,6 +23,7 @@ use std::fmt;
 use std::path::PathBuf;
 use thiserror::Error;
 use tokio::time::{Duration, sleep};
+use tracing::{debug, error, info, warn};
 use xor_name::XorName;
 
 #[derive(Debug, Error)]
@@ -133,11 +134,19 @@ impl Client {
                             .get(&xor_name)
                             .ok_or(MerklePutError::MissingPaymentProofFor(xor_name))?
                             .clone();
+
+                        // Get storing nodes for this chunk from the receipt
+                        let storing_nodes = receipt
+                            .storing_nodes
+                            .get(&xor_name)
+                            .map(|nodes| nodes.clone())
+                            .unwrap_or_default();
+
                         let client = self.clone();
                         // Keep chunk for potential retry on failure
                         tasks.push(async move {
                             let result =
-                                client.upload_chunk_with_merkle_proof(&chunk, &proof).await;
+                                client.upload_chunk_with_merkle_proof(&chunk, &proof, &storing_nodes).await;
                             (chunk, result)
                         });
                     }
@@ -203,6 +212,7 @@ impl Client {
     /// # Arguments
     /// * `chunk` - The chunk to upload
     /// * `proof` - The Merkle payment proof for this chunk
+    /// * `storing_nodes` - The storing nodes selected during consensus
     ///
     /// # Returns
     /// * ChunkAddress on success
@@ -210,21 +220,30 @@ impl Client {
         &self,
         chunk: &Chunk,
         proof: &MerklePaymentProof,
+        storing_nodes: &[libp2p::PeerId],
     ) -> Result<ChunkAddress, MerklePutError> {
         let address = *chunk.address();
         let network_addr = NetworkAddress::from(address);
-        self.upload_record_with_merkle_proof(network_addr, DataTypes::Chunk, chunk, proof)
+        self.upload_record_with_merkle_proof(network_addr, DataTypes::Chunk, chunk, proof, storing_nodes)
             .await?;
         Ok(address)
     }
 
-    /// Upload a record with a Merkle payment proof
+    /// Upload a record with a Merkle payment proof to specific storing nodes
+    ///
+    /// # Arguments
+    /// * `network_addr` - The network address for the record
+    /// * `data_type` - The data type being uploaded
+    /// * `data` - The data to upload
+    /// * `proof` - The Merkle payment proof
+    /// * `storing_nodes` - The storing nodes selected during consensus (close to chunk address)
     pub async fn upload_record_with_merkle_proof<T: serde::Serialize>(
         &self,
         network_addr: NetworkAddress,
         data_type: DataTypes,
         data: T,
         proof: &MerklePaymentProof,
+        storing_nodes: &[libp2p::PeerId],
     ) -> Result<(), MerklePutError> {
         let record_kind = RecordKind::DataWithMerklePayment(data_type);
         let record = Record {
@@ -240,13 +259,44 @@ impl Client {
             expires: None,
         };
 
-        let storing_nodes = self
-            .network
-            .get_closest_peers_with_retries(network_addr.clone(), None)
-            .await?;
+        // Use the storing nodes from consensus instead of querying again
+        // These are the nodes that agreed during the consensus phase
+        let storing_peer_infos = if storing_nodes.is_empty() {
+            // Fallback: if no storing nodes provided, query closest peers
+            warn!(
+                "No storing nodes provided for {:?}, falling back to closest peers query",
+                network_addr
+            );
+            self.network
+                .get_closest_peers_with_retries(network_addr.clone(), None)
+                .await?
+        } else {
+            // Convert PeerIds to PeerInfos
+            let mut peer_infos = Vec::with_capacity(storing_nodes.len());
+            for peer_id in storing_nodes {
+                if let Some(peer_info) = self.network.get_peer_info(*peer_id).await {
+                    peer_infos.push(peer_info);
+                } else {
+                    warn!("Could not find peer info for storing node {peer_id:?}");
+                }
+            }
+
+            if peer_infos.is_empty() {
+                // Fallback: if we couldn't get any peer infos, query closest peers
+                warn!(
+                    "Could not get peer info for any storing nodes for {:?}, falling back to closest peers query",
+                    network_addr
+                );
+                self.network
+                    .get_closest_peers_with_retries(network_addr.clone(), None)
+                    .await?
+            } else {
+                peer_infos
+            }
+        };
 
         self.network
-            .put_record_with_retries(record, storing_nodes.clone(), &self.config.chunks)
+            .put_record_with_retries(record, storing_peer_infos, &self.config.chunks)
             .await?;
 
         Ok(())
@@ -301,9 +351,16 @@ impl Client {
                     return Err(MerklePutError::MissingPaymentProofFor(xor_name));
                 };
 
+                // Get storing nodes for this chunk from the receipt
+                let storing_nodes = receipt
+                    .storing_nodes
+                    .get(&xor_name)
+                    .map(|nodes| nodes.clone())
+                    .unwrap_or_default();
+
                 let client = self.clone();
                 tasks.push(async move {
-                    let result = client.upload_chunk_with_merkle_proof(&chunk, &proof).await;
+                    let result = client.upload_chunk_with_merkle_proof(&chunk, &proof, &storing_nodes).await;
                     (chunk, result)
                 });
             }

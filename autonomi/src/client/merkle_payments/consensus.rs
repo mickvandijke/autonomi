@@ -42,6 +42,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
 use xor_name::XorName;
 
+/// A constant that defines the minimum number of common Merkle pool candidates required.
+const MIN_COMMON_MERKLE_CANDIDATES: usize = 8;
+
 /// Errors that can occur during consensus-based merkle candidate selection
 #[derive(Debug, thiserror::Error)]
 pub enum ConsensusError {
@@ -508,7 +511,6 @@ impl Client {
     /// Generate all valid 3-view combinations for a chunk's views.
     /// A combination is valid if the 3 views share at least 8 merkle candidates.
     fn generate_valid_combinations(views: &[&TopologyView]) -> Vec<(Vec<usize>, HashSet<PeerId>)> {
-        const MIN_COMMON: usize = 8;
         const VIEWS_PER_COMBO: usize = 3;
 
         let mut valid = Vec::new();
@@ -532,7 +534,7 @@ impl Client {
                 for k in (j + 1)..n {
                     let indices = vec![i, j, k];
                     let common = Self::intersect_views(views, &indices);
-                    if common.len() >= MIN_COMMON {
+                    if common.len() >= MIN_COMMON_MERKLE_CANDIDATES {
                         valid.push((indices, common));
                     }
                 }
@@ -917,7 +919,7 @@ impl Client {
     /// * `wallet` - The wallet for paying for probes
     ///
     /// # Returns
-    /// * (MerklePaymentCandidatePool, probe_cost) - Pool with consensus candidates and probe cost
+    /// * (MerklePaymentCandidatePool, storing_nodes, probe_cost) - Pool with consensus candidates, storing nodes per chunk, and probe cost
     pub(crate) async fn build_consensus_candidate_pool(
         &self,
         midpoint_proof: MidpointProof,
@@ -927,7 +929,14 @@ impl Client {
         data_type: DataTypes,
         data_size: usize,
         wallet: &EvmWallet,
-    ) -> Result<(MerklePaymentCandidatePool, AttoTokens), ConsensusError> {
+    ) -> Result<
+        (
+            MerklePaymentCandidatePool,
+            HashMap<XorName, Vec<PeerId>>,
+            AttoTokens,
+        ),
+        ConsensusError,
+    > {
         let midpoint_address = midpoint_proof.address();
         let merkle_payment_timestamp = midpoint_proof.merkle_payment_timestamp;
 
@@ -972,7 +981,7 @@ impl Client {
             .await?;
 
         // Step 2: Build consensus from topology views
-        let (consensus_candidates, _storing_nodes) =
+        let (consensus_candidates, storing_nodes) =
             self.build_consensus_candidates(&topology_views)?;
 
         // Step 3: Get actual signed quotes from consensus candidates
@@ -997,7 +1006,7 @@ impl Client {
             CANDIDATES_PER_POOL
         );
 
-        Ok((pool, probe_cost))
+        Ok((pool, storing_nodes, probe_cost))
     }
 
     /// Build consensus-based candidate pools for all midpoints (sequentially to avoid wallet contention).
@@ -1014,7 +1023,7 @@ impl Client {
     /// * `wallet` - The wallet for paying for probes
     ///
     /// # Returns
-    /// * (pools, total_probe_cost) - Vector of pools and total cost for probing
+    /// * (pools, storing_nodes, total_probe_cost) - Vector of pools, storing nodes per chunk address, and total cost for probing
     pub(crate) async fn build_consensus_candidate_pools(
         &self,
         midpoint_proofs: Vec<MidpointProof>,
@@ -1023,7 +1032,14 @@ impl Client {
         data_type: DataTypes,
         data_size: usize,
         wallet: &EvmWallet,
-    ) -> Result<(Vec<MerklePaymentCandidatePool>, AttoTokens), ConsensusError> {
+    ) -> Result<
+        (
+            Vec<MerklePaymentCandidatePool>,
+            HashMap<XorName, Vec<PeerId>>,
+            AttoTokens,
+        ),
+        ConsensusError,
+    > {
         info!(
             "Building consensus candidate pools for {} midpoints from {} chunks",
             midpoint_proofs.len(),
@@ -1033,10 +1049,11 @@ impl Client {
         // Build pools sequentially to avoid wallet contention
         // Each probe payment requires the wallet lock
         let mut pools = Vec::with_capacity(midpoint_proofs.len());
+        let mut all_storing_nodes: HashMap<XorName, Vec<PeerId>> = HashMap::new();
         let mut total_probe_cost = AttoTokens::zero();
 
         for (midpoint_index, proof) in midpoint_proofs.into_iter().enumerate() {
-            let (pool, probe_cost) = self
+            let (pool, storing_nodes, probe_cost) = self
                 .build_consensus_candidate_pool(
                     proof,
                     midpoint_index,
@@ -1048,6 +1065,7 @@ impl Client {
                 )
                 .await?;
             pools.push(pool);
+            all_storing_nodes.extend(storing_nodes);
             total_probe_cost = AttoTokens::from_atto(
                 total_probe_cost
                     .as_atto()
@@ -1060,7 +1078,7 @@ impl Client {
             pools.len()
         );
 
-        Ok((pools, total_probe_cost))
+        Ok((pools, all_storing_nodes, total_probe_cost))
     }
 }
 

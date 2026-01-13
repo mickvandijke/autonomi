@@ -19,6 +19,47 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, info};
 use xor_name::XorName;
 
+/// Serde helper for serializing/deserializing HashMap<XorName, Vec<PeerId>>
+mod peer_id_map_serde {
+    use libp2p::PeerId;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::HashMap;
+    use xor_name::XorName;
+
+    pub fn serialize<S>(
+        map: &HashMap<XorName, Vec<PeerId>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let string_map: HashMap<XorName, Vec<String>> = map
+            .iter()
+            .map(|(k, v)| (*k, v.iter().map(|p| p.to_base58()).collect()))
+            .collect();
+        string_map.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<HashMap<XorName, Vec<PeerId>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let string_map: HashMap<XorName, Vec<String>> = HashMap::deserialize(deserializer)?;
+        string_map
+            .into_iter()
+            .map(|(k, v)| {
+                let peer_ids: Result<Vec<PeerId>, _> =
+                    v.iter().map(|s| s.parse()).collect();
+                peer_ids
+                    .map(|peers| (k, peers))
+                    .map_err(serde::de::Error::custom)
+            })
+            .collect()
+    }
+}
+
 /// Contains the Merkle payment proofs for each XOR address and per-file chunk counts
 /// This is the Merkle payment equivalent of [`Receipt`](crate::client::payment::Receipt)
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -29,6 +70,10 @@ pub struct MerklePaymentReceipt {
     pub file_chunk_counts: HashMap<String, usize>,
     /// Total amount paid for this Merkle batch
     pub amount_paid: AttoTokens,
+    /// Storing nodes (close to chunk address) for each chunk that agreed during consensus
+    /// These are the nodes that should receive the put_record requests
+    #[serde(with = "peer_id_map_serde")]
+    pub storing_nodes: HashMap<XorName, Vec<libp2p::PeerId>>,
 }
 
 impl Default for MerklePaymentReceipt {
@@ -37,6 +82,7 @@ impl Default for MerklePaymentReceipt {
             proofs: HashMap::new(),
             file_chunk_counts: HashMap::new(),
             amount_paid: AttoTokens::zero(),
+            storing_nodes: HashMap::new(),
         }
     }
 }
@@ -51,6 +97,7 @@ impl MerklePaymentReceipt {
                 .as_atto()
                 .saturating_add(other.amount_paid.as_atto()),
         );
+        self.storing_nodes.extend(other.storing_nodes);
     }
 }
 
@@ -304,7 +351,7 @@ impl Client {
     /// Probing for consensus requires on-chain payments. The probe cost is returned
     /// separately so it can be included in the total amount paid.
     ///
-    /// Returns (tree, candidate_pools, pool_commitments, timestamp, probe_cost)
+    /// Returns (tree, candidate_pools, pool_commitments, storing_nodes, timestamp, probe_cost)
     pub(crate) async fn prepare_merkle_batch(
         &self,
         data_type: DataTypes,
@@ -316,6 +363,7 @@ impl Client {
             MerkleTree,
             Vec<MerklePaymentCandidatePool>,
             Vec<PoolCommitment>,
+            HashMap<XorName, Vec<libp2p::PeerId>>,
             u64,
             AttoTokens,
         ),
@@ -355,7 +403,7 @@ impl Client {
         // This probes storing nodes (close to chunk addresses) to get their topology views
         // of merkle candidates (close to midpoint addresses) and builds consensus.
         // Probing requires on-chain payments which are included in probe_cost.
-        let (candidate_pools, probe_cost) = self
+        let (candidate_pools, storing_nodes, probe_cost) = self
             .build_consensus_candidate_pools(
                 midpoint_proofs,
                 &chunks,
@@ -380,6 +428,7 @@ impl Client {
             tree,
             candidate_pools,
             pool_commitments,
+            storing_nodes,
             merkle_payment_timestamp,
             probe_cost,
         ))
@@ -400,7 +449,7 @@ impl Client {
 
         // Prepare the batch (build tree, query pools with actual chunks for consensus)
         // This includes paid probing for consensus discovery
-        let (tree, candidate_pools, pool_commitments, merkle_payment_timestamp, probe_cost) = self
+        let (tree, candidate_pools, pool_commitments, storing_nodes, merkle_payment_timestamp, probe_cost) = self
             .prepare_merkle_batch(data_type, chunks, data_size, wallet)
             .await?;
         let depth = tree.depth();
@@ -450,6 +499,7 @@ impl Client {
             proofs,
             file_chunk_counts: HashMap::new(),
             amount_paid: total_amount,
+            storing_nodes,
         };
 
         info!(

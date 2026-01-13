@@ -328,7 +328,14 @@ impl Client {
                         MerklePutError::MissingPaymentProofFor(xor_name),
                     ))?;
 
-                match self.upload_chunk_with_merkle_proof(chunk, proof).await {
+                // Get storing nodes for this chunk from the receipt
+                let storing_nodes = receipt
+                    .storing_nodes
+                    .get(&xor_name)
+                    .map(|nodes| nodes.as_slice())
+                    .unwrap_or(&[]);
+
+                match self.upload_chunk_with_merkle_proof(chunk, proof, storing_nodes).await {
                     Ok(_) => {
                         already_exist.insert(xor_name);
                     }
