@@ -24,13 +24,13 @@ pub(crate) use utils::multiaddr_is_global;
 pub use ant_evm::PaymentQuote;
 pub use ant_protocol::NetworkAddress;
 pub use config::{RetryStrategy, Strategy};
+#[cfg(feature = "developer")]
+pub use interface::DevGetClosestPeersFromNetworkResponse;
 pub use libp2p::kad::PeerInfo;
 pub use libp2p::{
     Multiaddr, PeerId,
     kad::{Quorum, Record},
 };
-#[cfg(feature = "developer")]
-pub use interface::DevGetClosestPeersFromNetworkResponse;
 
 // internal needs
 use crate::networking::version::PackageVersion;
@@ -1055,35 +1055,48 @@ impl Network {
         record: Record,
         peer: PeerInfo,
     ) -> Result<Vec<PeerId>, NetworkError> {
-        let result = self.put_record_req(record, peer.clone()).await;
+        const MAX_RETRIES: u8 = 2;
+        let mut last_error = None;
 
-        match result {
-            // If the record was accepted, the topology matched (unlikely for probe)
-            Ok(()) => {
-                debug!(
-                    "Probe to {:?} unexpectedly succeeded - topology matched",
-                    peer.peer_id
-                );
-                // Return empty - we don't have topology info since it succeeded
-                Err(NetworkError::PutRecordRejected(
-                    "Probe unexpectedly succeeded - topology matched".to_string(),
-                ))
-            }
-            // This is what we expect - extract the node's topology view
-            Err(NetworkError::TopologyVerificationFailed { node_peers, .. }) => {
-                debug!(
-                    "Got topology view from {:?}: {} peers",
-                    peer.peer_id,
-                    node_peers.len()
-                );
-                Ok(node_peers)
-            }
-            // Any other error is a real failure
-            Err(e) => {
-                debug!("Probe to {:?} failed with error: {}", peer.peer_id, e);
-                Err(e)
+        for attempt in 0..=MAX_RETRIES {
+            let result = self.put_record_req(record.clone(), peer.clone()).await;
+
+            match result {
+                // If the record was accepted, the topology matched (unlikely for probe)
+                Ok(()) => {
+                    debug!(
+                        "Probe to {:?} unexpectedly succeeded - topology matched",
+                        peer.peer_id
+                    );
+                    // Return empty - we don't have topology info since it succeeded
+                    return Err(NetworkError::PutRecordRejected(
+                        "Probe unexpectedly succeeded - topology matched".to_string(),
+                    ));
+                }
+                // This is what we expect - extract the node's topology view
+                Err(NetworkError::TopologyVerificationFailed { node_peers, .. }) => {
+                    debug!(
+                        "Got topology view from {:?}: {} peers",
+                        peer.peer_id,
+                        node_peers.len()
+                    );
+                    return Ok(node_peers);
+                }
+                // Any other error - retry up to MAX_RETRIES times
+                Err(e) => {
+                    debug!(
+                        "Probe to {:?} failed with error (attempt {}/{}): {}",
+                        peer.peer_id,
+                        attempt + 1,
+                        MAX_RETRIES + 1,
+                        e
+                    );
+                    last_error = Some(e);
+                }
             }
         }
+
+        Err(last_error.expect("loop must have run at least once"))
     }
 
     /// Get PeerInfo for a specific PeerId by querying closest peers.
