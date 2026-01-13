@@ -29,8 +29,8 @@ use ant_evm::merkle_payments::{
     MerklePaymentProof, MerkleTree, MidpointProof,
 };
 use ant_evm::{AttoTokens, EvmWallet};
+use ant_protocol::NetworkAddress;
 use ant_protocol::storage::{Chunk, ChunkAddress, DataTypes, RecordKind, try_serialize_record};
-use ant_protocol::{CLOSE_GROUP_SIZE, NetworkAddress};
 use evmlib::merkle_batch_payment::PoolCommitment;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -72,10 +72,12 @@ pub enum ConsensusError {
 /// Information about a node's view of network topology for a midpoint
 #[derive(Debug, Clone)]
 pub struct TopologyView {
+    /// The chunk address this view is for
+    pub chunk_address: XorName,
     /// The storing node that provided this view (close to chunk address)
     pub from_node: PeerId,
     /// The storing node's view of closest peers to the midpoint (merkle candidates)
-    pub closest_peers: Vec<PeerId>,
+    pub merkle_candidates: Vec<PeerId>,
 }
 
 /// Result of consensus building for a single midpoint
@@ -287,7 +289,9 @@ impl Client {
 
             let network = self.network.clone();
             tasks.push(async move {
-                let result = network.probe_for_topology(record, peer_info).await;
+                let result = network
+                    .probe_for_topology(chunk_address, record, peer_info)
+                    .await;
                 (peer_id, result)
             });
         }
@@ -295,14 +299,15 @@ impl Client {
         // Collect topology views from TopologyVerificationFailed errors
         while let Some((peer_id, result)) = tasks.next().await {
             match result {
-                Ok(node_peers) => {
+                Ok((chunk_address, node_peers)) => {
                     debug!(
                         "Got topology view from storing node {peer_id:?} with {} peers",
                         node_peers.len()
                     );
                     topology_views.push(TopologyView {
+                        chunk_address,
                         from_node: peer_id,
-                        closest_peers: node_peers,
+                        merkle_candidates: node_peers,
                     });
                 }
                 Err(e) => {
@@ -391,11 +396,11 @@ impl Client {
     /// * `views` - Topology views from multiple storing nodes
     ///
     /// # Returns
-    /// * Vector of CANDIDATES_PER_POOL PeerIds that appear in majority of views
+    /// * Vector of CANDIDATES_PER_POOL PeerIds that appear in majority of views and hashmap of the selected 3 nodes per chunk address
     pub(crate) fn build_consensus_candidates(
         &self,
         views: &[TopologyView],
-    ) -> Result<Vec<PeerId>, ConsensusError> {
+    ) -> Result<(Vec<PeerId>, HashMap<XorName, Vec<PeerId>>), ConsensusError> {
         if views.is_empty() {
             return Err(ConsensusError::InsufficientResponses {
                 got: 0,
@@ -404,51 +409,7 @@ impl Client {
             });
         }
 
-        // Count occurrences of each peer across all views
-        let mut peer_counts: HashMap<PeerId, usize> = HashMap::new();
-        for view in views {
-            for peer in &view.closest_peers {
-                *peer_counts.entry(*peer).or_insert(0) += 1;
-            }
-        }
-
-        // Calculate majority threshold (> 50% of views)
-        let majority_threshold = views.len() / 2;
-
-        // Filter peers that appear in majority of views and sort by count (descending)
-        let mut candidates: Vec<(PeerId, usize)> = peer_counts
-            .into_iter()
-            .filter(|(_, count)| *count > majority_threshold)
-            .collect();
-
-        candidates.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by count descending
-
-        // Take top CANDIDATES_PER_POOL candidates
-        let selected: Vec<PeerId> = candidates
-            .into_iter()
-            .take(CANDIDATES_PER_POOL)
-            .map(|(peer_id, _)| peer_id)
-            .collect();
-
-        if selected.len() < CANDIDATES_PER_POOL {
-            warn!(
-                "Only {} candidates reached consensus (need {})",
-                selected.len(),
-                CANDIDATES_PER_POOL
-            );
-            return Err(ConsensusError::NoConsensus {
-                found: selected.len(),
-                needed: CANDIDATES_PER_POOL,
-            });
-        }
-
-        debug!(
-            "Built consensus with {} candidates from {} views",
-            selected.len(),
-            views.len()
-        );
-
-        Ok(selected)
+        // todo: for every chunk we need to select 3 topologyviews that have at least 8 merkle candidates in common with all the selected sets of 3 topologyviews of the other chunks too.
     }
 
     /// Get merkle candidate quotes from specific peer IDs.
@@ -681,7 +642,8 @@ impl Client {
             .await?;
 
         // Step 2: Build consensus from topology views
-        let consensus_candidates = self.build_consensus_candidates(&topology_views)?;
+        let (consensus_candidates, storing_nodes) =
+            self.build_consensus_candidates(&topology_views)?;
 
         // Step 3: Get actual signed quotes from consensus candidates
         let candidate_nodes = self
@@ -804,21 +766,21 @@ mod tests {
         let views = vec![
             TopologyView {
                 from_node: PeerId::random(),
-                closest_peers: vec![peer1, peer2, peer3],
+                merkle_candidates: vec![peer1, peer2, peer3],
             },
             TopologyView {
                 from_node: PeerId::random(),
-                closest_peers: vec![peer1, peer2, peer3],
+                merkle_candidates: vec![peer1, peer2, peer3],
             },
             TopologyView {
                 from_node: PeerId::random(),
-                closest_peers: vec![peer1, peer2, peer3, peer4],
+                merkle_candidates: vec![peer1, peer2, peer3, peer4],
             },
         ];
 
         let mut peer_counts: HashMap<PeerId, usize> = HashMap::new();
         for view in &views {
-            for peer in &view.closest_peers {
+            for peer in &view.merkle_candidates {
                 *peer_counts.entry(*peer).or_insert(0) += 1;
             }
         }
@@ -849,25 +811,25 @@ mod tests {
         let views = vec![
             TopologyView {
                 from_node: PeerId::random(),
-                closest_peers: vec![peer1, peer2, peer_a],
+                merkle_candidates: vec![peer1, peer2, peer_a],
             },
             TopologyView {
                 from_node: PeerId::random(),
-                closest_peers: vec![peer1, peer3, peer_b],
+                merkle_candidates: vec![peer1, peer3, peer_b],
             },
             TopologyView {
                 from_node: PeerId::random(),
-                closest_peers: vec![peer2, peer3, peer_a],
+                merkle_candidates: vec![peer2, peer3, peer_a],
             },
             TopologyView {
                 from_node: PeerId::random(),
-                closest_peers: vec![peer1, peer2, peer3],
+                merkle_candidates: vec![peer1, peer2, peer3],
             },
         ];
 
         let mut peer_counts: HashMap<PeerId, usize> = HashMap::new();
         for view in &views {
-            for peer in &view.closest_peers {
+            for peer in &view.merkle_candidates {
                 *peer_counts.entry(*peer).or_insert(0) += 1;
             }
         }

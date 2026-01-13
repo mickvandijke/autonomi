@@ -47,6 +47,7 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{sleep, timeout};
+use xor_name::XorName;
 
 /// Result type for tasks responses sent by the [`crate::driver::NetworkDriver`] to the [`crate::Network`]
 pub(in crate::networking) type OneShotTaskResult<T> = oneshot::Sender<Result<T, NetworkError>>;
@@ -1052,9 +1053,10 @@ impl Network {
     /// * `Err(NetworkError)` - If the probe fails for a reason other than topology mismatch
     pub async fn probe_for_topology(
         &self,
+        chunk_address: XorName,
         record: Record,
         peer: PeerInfo,
-    ) -> Result<Vec<PeerId>, NetworkError> {
+    ) -> Result<(XorName, Vec<PeerId>), NetworkError> {
         const MAX_RETRIES: u8 = 2;
         let mut last_error = None;
 
@@ -1080,7 +1082,7 @@ impl Network {
                         peer.peer_id,
                         node_peers.len()
                     );
-                    return Ok(node_peers);
+                    return Ok((chunk_address, node_peers));
                 }
                 // Any other error - retry up to MAX_RETRIES times
                 Err(e) => {
