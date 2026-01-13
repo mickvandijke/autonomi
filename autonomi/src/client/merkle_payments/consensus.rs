@@ -47,8 +47,12 @@ use xor_name::XorName;
 pub enum ConsensusError {
     #[error("Network error: {0}")]
     Network(#[from] NetworkError),
-    #[error("Not enough topology responses: got {got}, needed at least {needed}")]
-    InsufficientResponses { got: usize, needed: usize },
+    #[error("Not enough topology responses: got {got}, needed at least {needed} ({context})")]
+    InsufficientResponses {
+        got: usize,
+        needed: usize,
+        context: String,
+    },
     #[error(
         "Could not reach consensus: only {found} candidates appear in majority of views (need {needed})"
     )]
@@ -155,7 +159,15 @@ impl Client {
         }
 
         if storing_node_to_chunk.is_empty() {
-            return Err(ConsensusError::InsufficientResponses { got: 0, needed: 1 });
+            return Err(ConsensusError::InsufficientResponses {
+                got: 0,
+                needed: 1,
+                context: format!(
+                    "probe_all_storing_nodes_for_topology: no storing nodes found across {} chunks for midpoint {:?}",
+                    chunks.len(),
+                    midpoint_address
+                ),
+            });
         }
 
         info!(
@@ -306,7 +318,14 @@ impl Client {
         );
 
         if topology_views.is_empty() {
-            return Err(ConsensusError::InsufficientResponses { got: 0, needed: 1 });
+            return Err(ConsensusError::InsufficientResponses {
+                got: 0,
+                needed: 1,
+                context: format!(
+                    "probe_all_storing_nodes_for_topology: all topology probes failed for midpoint {:?}",
+                    midpoint_address
+                ),
+            });
         }
 
         Ok((topology_views, probe_cost))
@@ -339,6 +358,10 @@ impl Client {
             return Err(ConsensusError::InsufficientResponses {
                 got: closest.len(),
                 needed: CANDIDATES_PER_POOL,
+                context: format!(
+                    "build_initial_candidate_pool: not enough closest peers for midpoint {:?}",
+                    midpoint_address
+                ),
             });
         }
 
@@ -374,7 +397,11 @@ impl Client {
         views: &[TopologyView],
     ) -> Result<Vec<PeerId>, ConsensusError> {
         if views.is_empty() {
-            return Err(ConsensusError::InsufficientResponses { got: 0, needed: 1 });
+            return Err(ConsensusError::InsufficientResponses {
+                got: 0,
+                needed: 1,
+                context: "build_consensus_candidates: no topology views provided".to_string(),
+            });
         }
 
         // Count occurrences of each peer across all views
@@ -564,6 +591,10 @@ impl Client {
             return Err(ConsensusError::InsufficientResponses {
                 got: candidates.len(),
                 needed: CANDIDATES_PER_POOL,
+                context: format!(
+                    "create_probe_candidates: not enough successful quote responses for midpoint {:?}",
+                    midpoint_address
+                ),
             });
         }
 
@@ -572,6 +603,10 @@ impl Client {
             .map_err(|v: Vec<_>| ConsensusError::InsufficientResponses {
                 got: v.len(),
                 needed: CANDIDATES_PER_POOL,
+                context: format!(
+                    "create_probe_candidates: try_into failed for midpoint {:?}",
+                    midpoint_address
+                ),
             })
     }
 
@@ -618,7 +653,14 @@ impl Client {
             .collect();
 
         if chunks_for_midpoint.is_empty() {
-            return Err(ConsensusError::InsufficientResponses { got: 0, needed: 1 });
+            return Err(ConsensusError::InsufficientResponses {
+                got: 0,
+                needed: 1,
+                context: format!(
+                    "build_consensus_candidate_pool: no chunks map to midpoint index {} ({:?})",
+                    midpoint_index, midpoint_address
+                ),
+            });
         }
 
         info!(

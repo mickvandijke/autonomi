@@ -206,6 +206,10 @@ impl Client {
                 super::consensus::ConsensusError::InsufficientResponses {
                     got: closest.len(),
                     needed: ant_evm::merkle_payments::CANDIDATES_PER_POOL,
+                    context: format!(
+                        "build_candidate_pool_for_cost: not enough closest peers for midpoint {:?}",
+                        midpoint_address
+                    ),
                 },
             ));
         }
@@ -284,6 +288,10 @@ impl Client {
             MerklePaymentError::Consensus(ConsensusError::InsufficientResponses {
                 got: v.len(),
                 needed: ant_evm::merkle_payments::CANDIDATES_PER_POOL,
+                context: format!(
+                    "build_consensus_candidate_pool_quotes_only: not enough quote responses for midpoint {:?}",
+                    midpoint_address
+                ),
             })
         })
     }
