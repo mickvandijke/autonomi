@@ -37,7 +37,7 @@ use futures::stream::FuturesUnordered;
 use libp2p::PeerId;
 use libp2p::kad::{PeerInfo, Record};
 use std::collections::HashMap;
-use std::num::NonZero;
+use std::num::{NonZero, NonZeroUsize};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
 use xor_name::XorName;
@@ -189,24 +189,10 @@ impl Client {
         })?;
 
         // Step 4: Get initial candidate pools using non-consensus approach
-
-        // Use known nodes as probing merkle candidate nodes
-        let midpoint_closest: Vec<PeerInfo> = storing_node_to_chunk
-            .values()
-            .map(|(pi, _, _)| pi)
-            .take(CANDIDATES_PER_POOL)
-            .cloned()
-            .collect();
-
         let mut probe_candidate_pools = Vec::with_capacity(probe_midpoint_proofs.len());
         for probe_mp in &probe_midpoint_proofs {
             let pool = self
-                .build_initial_candidate_pool(
-                    midpoint_closest.clone(),
-                    probe_mp.clone(),
-                    data_type,
-                    data_size,
-                )
+                .build_initial_candidate_pool(probe_mp.clone(), data_type, data_size)
                 .await?;
             probe_candidate_pools.push(pool);
         }
@@ -331,13 +317,23 @@ impl Client {
     /// This is used for probe payments before we have consensus.
     async fn build_initial_candidate_pool(
         &self,
-        closest: Vec<PeerInfo>,
         midpoint_proof: MidpointProof,
         data_type: DataTypes,
         data_size: usize,
     ) -> Result<MerklePaymentCandidatePool, ConsensusError> {
         let midpoint_address = midpoint_proof.address();
         let merkle_payment_timestamp = midpoint_proof.merkle_payment_timestamp;
+
+        let midpoint_network_addr =
+            NetworkAddress::ChunkAddress(ChunkAddress::new(midpoint_address));
+
+        let closest = self
+            .network
+            .get_closest_n_peers(
+                midpoint_network_addr.clone(),
+                NonZeroUsize::new(CANDIDATES_PER_POOL).expect("CANDIDATES_PER_POOL is non-zero"),
+            )
+            .await?;
 
         if closest.len() < CANDIDATES_PER_POOL {
             return Err(ConsensusError::InsufficientResponses {
