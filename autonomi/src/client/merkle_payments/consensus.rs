@@ -128,7 +128,7 @@ impl Client {
                 .network
                 .get_closest_n_peers(
                     chunk_network_addr.clone(),
-                    NonZero::new(CLOSE_GROUP_SIZE + 2).expect("CLOSE_GROUP_SIZE is non-zero"),
+                    NonZero::new(CANDIDATES_PER_POOL + 4).expect("CLOSE_GROUP_SIZE is non-zero"),
                 )
                 .await?;
 
@@ -146,13 +146,6 @@ impl Client {
         }
 
         info!(
-            "Found {} unique storing nodes across {} chunks for midpoint {midpoint_address:?}",
-            storing_nodes.len(),
-            chunk_addresses.len()
-        );
-
-        // todo: remove later
-        println!(
             "Found {} unique storing nodes across {} chunks for midpoint {midpoint_address:?}",
             storing_nodes.len(),
             chunk_addresses.len()
