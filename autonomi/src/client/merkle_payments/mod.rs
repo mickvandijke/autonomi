@@ -6,10 +6,12 @@
 // KIND, either express or implied. Please review the Licences for the specific language governing
 // permissions and limitations relating to use of the SAFE Network Software.
 
+mod consensus;
 mod file;
 mod payments;
 mod upload;
 
+pub use consensus::{ConsensusError, ConsensusResult, TopologyView};
 pub use file::{MerklePaymentOption, MerkleUploadError, MerkleUploadErrorWithReceipt};
 pub use payments::{MerklePaymentError, MerklePaymentReceipt};
 pub use upload::MerklePutError;

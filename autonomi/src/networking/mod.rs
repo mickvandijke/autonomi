@@ -1035,6 +1035,79 @@ impl Network {
         tracing::trace!("Waiting for connections made response");
         rx.await?
     }
+
+    /// Probe a specific peer to get its view of network topology for consensus.
+    ///
+    /// This sends a record to a specific peer, expecting it to reject with
+    /// TopologyVerificationFailed. The error contains the peer's view of
+    /// closest nodes to the target (midpoint) address, which is used for
+    /// consensus-based merkle candidate selection.
+    ///
+    /// # Arguments
+    /// * `record` - The record to send (with merkle proof)
+    /// * `peer` - The peer to probe
+    ///
+    /// # Returns
+    /// * `Ok(Vec<PeerId>)` - The peer's view of closest nodes to the midpoint
+    /// * `Err(NetworkError)` - If the probe fails for a reason other than topology mismatch
+    pub async fn probe_for_topology(
+        &self,
+        record: Record,
+        peer: PeerInfo,
+    ) -> Result<Vec<PeerId>, NetworkError> {
+        let result = self.put_record_req(record, peer.clone()).await;
+
+        match result {
+            // If the record was accepted, the topology matched (unlikely for probe)
+            Ok(()) => {
+                debug!(
+                    "Probe to {:?} unexpectedly succeeded - topology matched",
+                    peer.peer_id
+                );
+                // Return empty - we don't have topology info since it succeeded
+                Err(NetworkError::PutRecordRejected(
+                    "Probe unexpectedly succeeded - topology matched".to_string(),
+                ))
+            }
+            // This is what we expect - extract the node's topology view
+            Err(NetworkError::TopologyVerificationFailed { node_peers, .. }) => {
+                debug!(
+                    "Got topology view from {:?}: {} peers",
+                    peer.peer_id,
+                    node_peers.len()
+                );
+                Ok(node_peers)
+            }
+            // Any other error is a real failure
+            Err(e) => {
+                debug!("Probe to {:?} failed with error: {}", peer.peer_id, e);
+                Err(e)
+            }
+        }
+    }
+
+    /// Get PeerInfo for a specific PeerId by querying closest peers.
+    ///
+    /// This is a best-effort lookup - the peer must be in the routing table
+    /// of one of the closest peers to be found.
+    ///
+    /// # Arguments
+    /// * `peer_id` - The PeerId to look up
+    ///
+    /// # Returns
+    /// * `Some(PeerInfo)` if the peer was found
+    /// * `None` if the peer could not be found
+    pub async fn get_peer_info(&self, peer_id: PeerId) -> Option<PeerInfo> {
+        // Query closest peers to the peer's address
+        let peer_addr = NetworkAddress::from(peer_id);
+        let closest = self
+            .get_closest_peers_with_retries(peer_addr, Some(CLOSE_GROUP_SIZE))
+            .await
+            .ok()?;
+
+        // Look for the peer in the results
+        closest.into_iter().find(|p| p.peer_id == peer_id)
+    }
 }
 
 fn expected_holders(quorum: Quorum, total: NonZeroUsize) -> NonZeroUsize {
