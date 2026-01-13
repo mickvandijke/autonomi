@@ -36,7 +36,7 @@ use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use libp2p::PeerId;
 use libp2p::kad::{PeerInfo, Record};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::{NonZero, NonZeroUsize};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
@@ -389,14 +389,20 @@ impl Client {
 
     /// Build consensus candidates from multiple topology views.
     ///
-    /// This implements majority voting: a peer is selected if it appears in more than
-    /// 50% of the topology views.
+    /// For every chunk, we select 3 topology views that have at least 8 merkle candidates
+    /// in common with all selected sets of 3 topology views from other chunks.
+    ///
+    /// # Algorithm
+    /// 1. Group views by chunk address
+    /// 2. For each group, generate all 3-view combinations with >= 8 common candidates
+    /// 3. Cross-check combinations between groups to find a valid global selection
+    /// 4. If common candidates < 16, pad with most frequent peers from the combinations
     ///
     /// # Arguments
     /// * `views` - Topology views from multiple storing nodes
     ///
     /// # Returns
-    /// * Vector of CANDIDATES_PER_POOL PeerIds that appear in majority of views and hashmap of the selected 3 nodes per chunk address
+    /// * Vector of CANDIDATES_PER_POOL PeerIds and hashmap of the selected 3 storing nodes per chunk address
     pub(crate) fn build_consensus_candidates(
         &self,
         views: &[TopologyView],
@@ -409,7 +415,331 @@ impl Client {
             });
         }
 
-        // todo: for every chunk we need to select 3 topologyviews that have at least 8 merkle candidates in common with all the selected sets of 3 topologyviews of the other chunks too.
+        // Step 1: Group views by chunk address
+        let mut views_by_chunk: HashMap<XorName, Vec<&TopologyView>> = HashMap::new();
+        for view in views {
+            views_by_chunk
+                .entry(view.chunk_address)
+                .or_default()
+                .push(view);
+        }
+
+        debug!(
+            "Grouped {} views into {} chunk address groups",
+            views.len(),
+            views_by_chunk.len()
+        );
+
+        // Step 2: For each group, generate valid 3-view combinations (>= 8 common candidates)
+        // Store as: chunk_address -> Vec<(view_indices, common_candidates_set)>
+        let mut valid_combinations: HashMap<XorName, Vec<(Vec<usize>, HashSet<PeerId>)>> =
+            HashMap::new();
+
+        for (chunk_addr, chunk_views) in &views_by_chunk {
+            let combinations = Self::generate_valid_combinations(chunk_views);
+            if combinations.is_empty() {
+                warn!(
+                    "No valid 3-view combinations for chunk {chunk_addr:?} with {} views",
+                    chunk_views.len()
+                );
+            } else {
+                debug!(
+                    "Chunk {chunk_addr:?}: {} valid combinations from {} views",
+                    combinations.len(),
+                    chunk_views.len()
+                );
+            }
+            valid_combinations.insert(*chunk_addr, combinations);
+        }
+
+        // Step 3: Cross-check combinations between groups
+        let chunk_addrs: Vec<XorName> = valid_combinations.keys().copied().collect();
+
+        let (global_common, selected_indices) =
+            Self::find_cross_group_consensus(&chunk_addrs, &valid_combinations)?;
+
+        debug!(
+            "Found cross-group consensus with {} common candidates",
+            global_common.len()
+        );
+
+        // Step 4: Build the selected storing nodes map
+        let mut selected_storing_nodes: HashMap<XorName, Vec<PeerId>> = HashMap::new();
+        for (chunk_addr, combo_idx) in &selected_indices {
+            if let Some(chunk_views) = views_by_chunk.get(chunk_addr) {
+                if let Some(combinations) = valid_combinations.get(chunk_addr) {
+                    if let Some((view_indices, _)) = combinations.get(*combo_idx) {
+                        let storing_nodes: Vec<PeerId> = view_indices
+                            .iter()
+                            .filter_map(|&i| chunk_views.get(i).map(|v| v.from_node))
+                            .collect();
+                        selected_storing_nodes.insert(*chunk_addr, storing_nodes);
+                    }
+                }
+            }
+        }
+
+        // Step 5: If common candidates < 16, pad with most frequent peers
+        let final_candidates = if global_common.len() >= CANDIDATES_PER_POOL {
+            global_common
+                .into_iter()
+                .take(CANDIDATES_PER_POOL)
+                .collect()
+        } else {
+            Self::pad_candidates_by_frequency(global_common, &selected_indices, &valid_combinations)
+        };
+
+        if final_candidates.len() < CANDIDATES_PER_POOL {
+            return Err(ConsensusError::NoConsensus {
+                found: final_candidates.len(),
+                needed: CANDIDATES_PER_POOL,
+            });
+        }
+
+        info!(
+            "Built consensus with {} candidates from {} chunk groups",
+            final_candidates.len(),
+            selected_storing_nodes.len()
+        );
+
+        Ok((final_candidates, selected_storing_nodes))
+    }
+
+    /// Generate all valid 3-view combinations for a chunk's views.
+    /// A combination is valid if the 3 views share at least 8 merkle candidates.
+    fn generate_valid_combinations(views: &[&TopologyView]) -> Vec<(Vec<usize>, HashSet<PeerId>)> {
+        const MIN_COMMON: usize = 8;
+        const VIEWS_PER_COMBO: usize = 3;
+
+        let mut valid = Vec::new();
+        let n = views.len();
+
+        if n < VIEWS_PER_COMBO {
+            // Not enough views for a combination, use all available
+            if !views.is_empty() {
+                let indices: Vec<usize> = (0..n).collect();
+                let common = Self::intersect_views(views, &indices);
+                if !common.is_empty() {
+                    valid.push((indices, common));
+                }
+            }
+            return valid;
+        }
+
+        // Generate all C(n, 3) combinations
+        for i in 0..n {
+            for j in (i + 1)..n {
+                for k in (j + 1)..n {
+                    let indices = vec![i, j, k];
+                    let common = Self::intersect_views(views, &indices);
+                    if common.len() >= MIN_COMMON {
+                        valid.push((indices, common));
+                    }
+                }
+            }
+        }
+
+        valid
+    }
+
+    /// Compute intersection of merkle candidates for selected view indices
+    fn intersect_views(views: &[&TopologyView], indices: &[usize]) -> HashSet<PeerId> {
+        if indices.is_empty() {
+            return HashSet::new();
+        }
+
+        let mut result: HashSet<PeerId> = views
+            .get(indices[0])
+            .map(|v| v.merkle_candidates.iter().copied().collect())
+            .unwrap_or_default();
+
+        for &idx in &indices[1..] {
+            if let Some(view) = views.get(idx) {
+                let candidates: HashSet<PeerId> = view.merkle_candidates.iter().copied().collect();
+                result = result.intersection(&candidates).copied().collect();
+            }
+        }
+
+        result
+    }
+
+    /// Find a valid selection of combinations across all groups.
+    /// Returns the global common candidates and the selected combination index per chunk.
+    fn find_cross_group_consensus(
+        chunk_addrs: &[XorName],
+        valid_combinations: &HashMap<XorName, Vec<(Vec<usize>, HashSet<PeerId>)>>,
+    ) -> Result<(HashSet<PeerId>, Vec<(XorName, usize)>), ConsensusError> {
+        const MIN_COMMON: usize = 8;
+
+        if chunk_addrs.is_empty() {
+            return Err(ConsensusError::InsufficientResponses {
+                got: 0,
+                needed: 1,
+                context: "find_cross_group_consensus: no chunk groups".to_string(),
+            });
+        }
+
+        // Handle single chunk case
+        if chunk_addrs.len() == 1 {
+            let addr = chunk_addrs[0];
+            if let Some(combos) = valid_combinations.get(&addr) {
+                if let Some((_, common)) = combos.first() {
+                    return Ok((common.clone(), vec![(addr, 0)]));
+                }
+            }
+            return Err(ConsensusError::NoConsensus {
+                found: 0,
+                needed: MIN_COMMON,
+            });
+        }
+
+        // Use backtracking to find valid cross-group selection
+        let mut selected: Vec<(XorName, usize)> = Vec::with_capacity(chunk_addrs.len());
+        let mut current_common: Option<HashSet<PeerId>> = None;
+
+        if Self::backtrack_find_consensus(
+            chunk_addrs,
+            valid_combinations,
+            0,
+            &mut selected,
+            &mut current_common,
+            MIN_COMMON,
+        ) {
+            Ok((current_common.unwrap_or_default(), selected))
+        } else {
+            // Fallback: use first valid combination from each group, accept smaller intersection
+            let mut fallback_common: Option<HashSet<PeerId>> = None;
+            let mut fallback_selected = Vec::new();
+
+            for addr in chunk_addrs {
+                if let Some(combos) = valid_combinations.get(addr) {
+                    if let Some((_, common)) = combos.first() {
+                        fallback_selected.push((*addr, 0));
+                        fallback_common = Some(match fallback_common {
+                            Some(existing) => existing.intersection(common).copied().collect(),
+                            None => common.clone(),
+                        });
+                    }
+                }
+            }
+
+            if let Some(common) = fallback_common {
+                if !common.is_empty() {
+                    warn!(
+                        "Using fallback consensus with {} common candidates (less than ideal {})",
+                        common.len(),
+                        MIN_COMMON
+                    );
+                    return Ok((common, fallback_selected));
+                }
+            }
+
+            Err(ConsensusError::NoConsensus {
+                found: 0,
+                needed: MIN_COMMON,
+            })
+        }
+    }
+
+    /// Backtracking algorithm to find valid combination selection across groups
+    fn backtrack_find_consensus(
+        chunk_addrs: &[XorName],
+        valid_combinations: &HashMap<XorName, Vec<(Vec<usize>, HashSet<PeerId>)>>,
+        depth: usize,
+        selected: &mut Vec<(XorName, usize)>,
+        current_common: &mut Option<HashSet<PeerId>>,
+        min_common: usize,
+    ) -> bool {
+        if depth >= chunk_addrs.len() {
+            // All groups processed, check if we have enough common candidates
+            return current_common
+                .as_ref()
+                .is_some_and(|c| c.len() >= min_common);
+        }
+
+        let addr = chunk_addrs[depth];
+        let combos = match valid_combinations.get(&addr) {
+            Some(c) if !c.is_empty() => c,
+            _ => {
+                // No valid combinations for this chunk, skip it
+                return Self::backtrack_find_consensus(
+                    chunk_addrs,
+                    valid_combinations,
+                    depth + 1,
+                    selected,
+                    current_common,
+                    min_common,
+                );
+            }
+        };
+
+        for (combo_idx, (_, common)) in combos.iter().enumerate() {
+            // Compute new intersection
+            let new_common = match current_common {
+                Some(existing) => existing.intersection(common).copied().collect(),
+                None => common.clone(),
+            };
+
+            // Prune: if intersection already too small, skip this branch
+            if new_common.len() < min_common && depth < chunk_addrs.len() - 1 {
+                continue;
+            }
+
+            // Try this combination
+            selected.push((addr, combo_idx));
+            let old_common = current_common.take();
+            *current_common = Some(new_common);
+
+            if Self::backtrack_find_consensus(
+                chunk_addrs,
+                valid_combinations,
+                depth + 1,
+                selected,
+                current_common,
+                min_common,
+            ) {
+                return true;
+            }
+
+            // Backtrack
+            selected.pop();
+            *current_common = old_common;
+        }
+
+        false
+    }
+
+    /// Pad candidates with most frequent peers from selected combinations until we reach 16.
+    fn pad_candidates_by_frequency(
+        mut candidates: HashSet<PeerId>,
+        selected_indices: &[(XorName, usize)],
+        valid_combinations: &HashMap<XorName, Vec<(Vec<usize>, HashSet<PeerId>)>>,
+    ) -> Vec<PeerId> {
+        // Count frequency of peers across selected combinations
+        let mut frequency: HashMap<PeerId, usize> = HashMap::new();
+
+        for (addr, combo_idx) in selected_indices {
+            if let Some(combos) = valid_combinations.get(addr) {
+                if let Some((_, common)) = combos.get(*combo_idx) {
+                    for peer in common {
+                        *frequency.entry(*peer).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+
+        // Sort by frequency (descending), then add to candidates
+        let mut freq_vec: Vec<(PeerId, usize)> = frequency.into_iter().collect();
+        freq_vec.sort_by(|a, b| b.1.cmp(&a.1));
+
+        for (peer, _) in freq_vec {
+            if candidates.len() >= CANDIDATES_PER_POOL {
+                break;
+            }
+            candidates.insert(peer);
+        }
+
+        candidates.into_iter().take(CANDIDATES_PER_POOL).collect()
     }
 
     /// Get merkle candidate quotes from specific peer IDs.
@@ -642,7 +972,7 @@ impl Client {
             .await?;
 
         // Step 2: Build consensus from topology views
-        let (consensus_candidates, storing_nodes) =
+        let (consensus_candidates, _storing_nodes) =
             self.build_consensus_candidates(&topology_views)?;
 
         // Step 3: Get actual signed quotes from consensus candidates
@@ -756,101 +1086,198 @@ mod tests {
     }
 
     #[test]
-    fn test_build_consensus_from_views() {
+    fn test_intersect_views() {
         let peer1 = PeerId::random();
         let peer2 = PeerId::random();
         let peer3 = PeerId::random();
         let peer4 = PeerId::random();
 
-        // Views where peer1, peer2, peer3 appear in all views, peer4 only in one
+        let chunk_addr = XorName::random(&mut rand::thread_rng());
         let views = vec![
             TopologyView {
+                chunk_address: chunk_addr,
                 from_node: PeerId::random(),
                 merkle_candidates: vec![peer1, peer2, peer3],
             },
             TopologyView {
-                from_node: PeerId::random(),
-                merkle_candidates: vec![peer1, peer2, peer3],
-            },
-            TopologyView {
+                chunk_address: chunk_addr,
                 from_node: PeerId::random(),
                 merkle_candidates: vec![peer1, peer2, peer3, peer4],
             },
-        ];
-
-        let mut peer_counts: HashMap<PeerId, usize> = HashMap::new();
-        for view in &views {
-            for peer in &view.merkle_candidates {
-                *peer_counts.entry(*peer).or_insert(0) += 1;
-            }
-        }
-
-        let majority_threshold = views.len() / 2; // 1 for 3 views
-
-        let candidates: Vec<PeerId> = peer_counts
-            .into_iter()
-            .filter(|(_, count)| *count > majority_threshold)
-            .map(|(peer_id, _)| peer_id)
-            .collect();
-
-        assert!(candidates.contains(&peer1));
-        assert!(candidates.contains(&peer2));
-        assert!(candidates.contains(&peer3));
-        // peer4 appears in 1 view, which is NOT > 1
-        assert!(!candidates.contains(&peer4));
-    }
-
-    #[test]
-    fn test_consensus_with_disagreement() {
-        let peer1 = PeerId::random();
-        let peer2 = PeerId::random();
-        let peer3 = PeerId::random();
-        let peer_a = PeerId::random();
-        let peer_b = PeerId::random();
-
-        let views = vec![
             TopologyView {
-                from_node: PeerId::random(),
-                merkle_candidates: vec![peer1, peer2, peer_a],
-            },
-            TopologyView {
-                from_node: PeerId::random(),
-                merkle_candidates: vec![peer1, peer3, peer_b],
-            },
-            TopologyView {
-                from_node: PeerId::random(),
-                merkle_candidates: vec![peer2, peer3, peer_a],
-            },
-            TopologyView {
+                chunk_address: chunk_addr,
                 from_node: PeerId::random(),
                 merkle_candidates: vec![peer1, peer2, peer3],
             },
         ];
 
-        let mut peer_counts: HashMap<PeerId, usize> = HashMap::new();
-        for view in &views {
-            for peer in &view.merkle_candidates {
-                *peer_counts.entry(*peer).or_insert(0) += 1;
-            }
+        let view_refs: Vec<&TopologyView> = views.iter().collect();
+        let intersection = Client::intersect_views(&view_refs, &[0, 1, 2]);
+
+        // All three share peer1, peer2, peer3
+        assert!(intersection.contains(&peer1));
+        assert!(intersection.contains(&peer2));
+        assert!(intersection.contains(&peer3));
+        // peer4 only in view 1
+        assert!(!intersection.contains(&peer4));
+        assert_eq!(intersection.len(), 3);
+    }
+
+    #[test]
+    fn test_generate_valid_combinations() {
+        // Create 8 common peers (minimum required)
+        let common_peers: Vec<PeerId> = (0..8).map(|_| PeerId::random()).collect();
+        let extra_peer = PeerId::random();
+
+        let chunk_addr = XorName::random(&mut rand::thread_rng());
+
+        // All views share the 8 common peers
+        let views = vec![
+            TopologyView {
+                chunk_address: chunk_addr,
+                from_node: PeerId::random(),
+                merkle_candidates: common_peers.clone(),
+            },
+            TopologyView {
+                chunk_address: chunk_addr,
+                from_node: PeerId::random(),
+                merkle_candidates: common_peers.clone(),
+            },
+            TopologyView {
+                chunk_address: chunk_addr,
+                from_node: PeerId::random(),
+                merkle_candidates: [common_peers.clone(), vec![extra_peer]].concat(),
+            },
+        ];
+
+        let view_refs: Vec<&TopologyView> = views.iter().collect();
+        let combinations = Client::generate_valid_combinations(&view_refs);
+
+        // Should have exactly 1 combination (C(3,3) = 1)
+        assert_eq!(combinations.len(), 1);
+
+        // The combination should have exactly 8 common candidates
+        let (indices, common) = &combinations[0];
+        assert_eq!(indices.len(), 3);
+        assert_eq!(common.len(), 8);
+        for peer in &common_peers {
+            assert!(common.contains(peer));
         }
+    }
 
-        let majority_threshold = views.len() / 2; // 2 for 4 views
+    #[test]
+    fn test_generate_valid_combinations_insufficient_common() {
+        // Create only 5 common peers (less than 8 required)
+        let common_peers: Vec<PeerId> = (0..5).map(|_| PeerId::random()).collect();
+        let extra1 = PeerId::random();
+        let extra2 = PeerId::random();
+        let extra3 = PeerId::random();
 
-        assert_eq!(peer_counts.get(&peer1), Some(&3));
-        assert_eq!(peer_counts.get(&peer2), Some(&3));
-        assert_eq!(peer_counts.get(&peer3), Some(&3));
-        assert_eq!(peer_counts.get(&peer_a), Some(&2));
-        assert_eq!(peer_counts.get(&peer_b), Some(&1));
+        let chunk_addr = XorName::random(&mut rand::thread_rng());
 
-        let passing: Vec<PeerId> = peer_counts
-            .into_iter()
-            .filter(|(_, count)| *count > majority_threshold)
-            .map(|(peer_id, _)| peer_id)
+        // Views don't share enough peers
+        let views = vec![
+            TopologyView {
+                chunk_address: chunk_addr,
+                from_node: PeerId::random(),
+                merkle_candidates: [common_peers.clone(), vec![extra1]].concat(),
+            },
+            TopologyView {
+                chunk_address: chunk_addr,
+                from_node: PeerId::random(),
+                merkle_candidates: [common_peers.clone(), vec![extra2]].concat(),
+            },
+            TopologyView {
+                chunk_address: chunk_addr,
+                from_node: PeerId::random(),
+                merkle_candidates: [common_peers.clone(), vec![extra3]].concat(),
+            },
+        ];
+
+        let view_refs: Vec<&TopologyView> = views.iter().collect();
+        let combinations = Client::generate_valid_combinations(&view_refs);
+
+        // Should have no valid combinations (only 5 common, need 8)
+        assert!(combinations.is_empty());
+    }
+
+    #[test]
+    fn test_cross_group_consensus_single_chunk() {
+        let common_peers: Vec<PeerId> = (0..10).map(|_| PeerId::random()).collect();
+        let chunk_addr = XorName::random(&mut rand::thread_rng());
+
+        let views = vec![
+            TopologyView {
+                chunk_address: chunk_addr,
+                from_node: PeerId::random(),
+                merkle_candidates: common_peers.clone(),
+            },
+            TopologyView {
+                chunk_address: chunk_addr,
+                from_node: PeerId::random(),
+                merkle_candidates: common_peers.clone(),
+            },
+            TopologyView {
+                chunk_address: chunk_addr,
+                from_node: PeerId::random(),
+                merkle_candidates: common_peers.clone(),
+            },
+        ];
+
+        let view_refs: Vec<&TopologyView> = views.iter().collect();
+        let combinations = Client::generate_valid_combinations(&view_refs);
+
+        let mut valid_combinations: HashMap<XorName, Vec<(Vec<usize>, HashSet<PeerId>)>> =
+            HashMap::new();
+        valid_combinations.insert(chunk_addr, combinations);
+
+        let result = Client::find_cross_group_consensus(&[chunk_addr], &valid_combinations);
+        assert!(result.is_ok());
+
+        let (common, selected) = result.unwrap();
+        assert_eq!(common.len(), 10);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].0, chunk_addr);
+    }
+
+    #[test]
+    fn test_cross_group_consensus_multiple_chunks() {
+        // Create peers that are common across all chunks
+        let global_common: Vec<PeerId> = (0..10).map(|_| PeerId::random()).collect();
+
+        let chunk1 = XorName::random(&mut rand::thread_rng());
+        let chunk2 = XorName::random(&mut rand::thread_rng());
+
+        // Both chunks have views with the same common peers
+        let views1: Vec<TopologyView> = (0..3)
+            .map(|_| TopologyView {
+                chunk_address: chunk1,
+                from_node: PeerId::random(),
+                merkle_candidates: global_common.clone(),
+            })
             .collect();
 
-        assert_eq!(passing.len(), 3);
-        assert!(passing.contains(&peer1));
-        assert!(passing.contains(&peer2));
-        assert!(passing.contains(&peer3));
+        let views2: Vec<TopologyView> = (0..3)
+            .map(|_| TopologyView {
+                chunk_address: chunk2,
+                from_node: PeerId::random(),
+                merkle_candidates: global_common.clone(),
+            })
+            .collect();
+
+        let view_refs1: Vec<&TopologyView> = views1.iter().collect();
+        let view_refs2: Vec<&TopologyView> = views2.iter().collect();
+
+        let mut valid_combinations: HashMap<XorName, Vec<(Vec<usize>, HashSet<PeerId>)>> =
+            HashMap::new();
+        valid_combinations.insert(chunk1, Client::generate_valid_combinations(&view_refs1));
+        valid_combinations.insert(chunk2, Client::generate_valid_combinations(&view_refs2));
+
+        let result = Client::find_cross_group_consensus(&[chunk1, chunk2], &valid_combinations);
+        assert!(result.is_ok());
+
+        let (common, selected) = result.unwrap();
+        assert_eq!(common.len(), 10);
+        assert_eq!(selected.len(), 2);
     }
 }
