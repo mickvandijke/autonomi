@@ -28,7 +28,7 @@ use ant_evm::merkle_payments::{
     CANDIDATES_PER_POOL, MerkleBranch, MerklePaymentCandidateNode, MerklePaymentCandidatePool,
     MerklePaymentProof, MerkleTree, MidpointProof,
 };
-use ant_protocol::storage::{ChunkAddress, DataTypes, RecordKind, try_serialize_record};
+use ant_protocol::storage::{Chunk, ChunkAddress, DataTypes, RecordKind, try_serialize_record};
 use ant_protocol::{CLOSE_GROUP_SIZE, NetworkAddress};
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -93,10 +93,11 @@ impl Client {
     /// Probe storing nodes from ALL chunks that map to a midpoint.
     ///
     /// This collects topology views from ALL storing nodes across ALL chunks
-    /// that map to the same midpoint, deduplicating nodes to avoid redundant probes.
+    /// that map to the same midpoint. Each storing node is probed with a record
+    /// containing actual chunk data (required for content-addressed validation).
     ///
     /// # Arguments
-    /// * `chunk_addresses` - All chunk addresses that map to this midpoint
+    /// * `chunks` - All chunks that map to this midpoint (with actual data)
     /// * `midpoint_proof` - The midpoint proof for the merkle tree
     /// * `data_type` - The data type being uploaded
     /// * `data_size` - The data size for quotes
@@ -105,7 +106,7 @@ impl Client {
     /// * Vector of TopologyView from all unique storing nodes
     pub(crate) async fn probe_all_storing_nodes_for_topology(
         &self,
-        chunk_addresses: &[XorName],
+        chunks: &[Chunk],
         midpoint_proof: &MidpointProof,
         data_type: DataTypes,
         data_size: usize,
@@ -115,15 +116,15 @@ impl Client {
 
         info!(
             "Probing storing nodes from {} chunks for midpoint {midpoint_address:?}",
-            chunk_addresses.len()
+            chunks.len()
         );
 
-        // Step 1: Collect storing nodes from ALL chunks, deduplicating by PeerId
-        let mut all_storing_nodes: HashMap<PeerId, PeerInfo> = HashMap::new();
+        // Step 1: Collect storing nodes from ALL chunks, tracking which chunk they're responsible for
+        // HashMap from PeerId -> (PeerInfo, chunk they're responsible for)
+        let mut storing_node_to_chunk: HashMap<PeerId, (PeerInfo, Chunk)> = HashMap::new();
 
-        for chunk_address in chunk_addresses {
-            let chunk_network_addr =
-                NetworkAddress::ChunkAddress(ChunkAddress::new(*chunk_address));
+        for chunk in chunks {
+            let chunk_network_addr = NetworkAddress::ChunkAddress(*chunk.address());
             let storing_nodes = self
                 .network
                 .get_closest_n_peers(
@@ -133,27 +134,27 @@ impl Client {
                 .await?;
 
             for peer_info in storing_nodes {
-                all_storing_nodes
+                // Only insert if not already present (keep the first chunk they were found for)
+                storing_node_to_chunk
                     .entry(peer_info.peer_id)
-                    .or_insert(peer_info);
+                    .or_insert((peer_info, chunk.clone()));
             }
         }
 
-        let storing_nodes: Vec<PeerInfo> = all_storing_nodes.into_values().collect();
-
-        if storing_nodes.is_empty() {
+        if storing_node_to_chunk.is_empty() {
             return Err(ConsensusError::InsufficientResponses { got: 0, needed: 1 });
         }
 
         info!(
             "Found {} unique storing nodes across {} chunks for midpoint {midpoint_address:?}",
-            storing_nodes.len(),
-            chunk_addresses.len()
+            storing_node_to_chunk.len(),
+            chunks.len()
         );
 
         // Step 2: Re-use storing nodes as probe candidates
-        let midpoint_closest: Vec<PeerInfo> = storing_nodes
-            .iter()
+        let midpoint_closest: Vec<PeerInfo> = storing_node_to_chunk
+            .values()
+            .map(|(pi, _)| pi)
             .take(CANDIDATES_PER_POOL)
             .cloned()
             .collect();
@@ -169,44 +170,39 @@ impl Client {
             )
             .await?;
 
-        // Step 4: Create probe merkle proof with the probe candidates
+        // Step 4: Create probe merkle proof pool (same for all probes)
         let probe_pool = MerklePaymentCandidatePool {
             midpoint_proof: midpoint_proof.clone(),
             candidate_nodes: probe_candidates,
         };
 
-        // Use first chunk address for the probe record
-        let probe_chunk_address = chunk_addresses[0];
-        let probe_chunk_network_addr =
-            NetworkAddress::ChunkAddress(ChunkAddress::new(probe_chunk_address));
-        let dummy_data = vec![0u8; 32];
-        let probe_proof = MerklePaymentProof {
-            address: probe_chunk_address,
-            data_proof: create_dummy_merkle_branch(probe_chunk_address)?,
-            winner_pool: probe_pool,
-        };
-
-        let record_kind = RecordKind::DataWithMerklePayment(data_type);
-        let record = Record {
-            key: probe_chunk_network_addr.to_record_key(),
-            value: try_serialize_record(&(probe_proof.clone(), dummy_data), record_kind)
-                .map_err(|e| {
-                    ConsensusError::Serialization(format!("Failed to serialize probe: {e:?}"))
-                })?
-                .to_vec(),
-            publisher: None,
-            expires: None,
-        };
-
-        // Step 5: Probe ALL unique storing nodes in parallel
+        // Step 5: Probe each storing node with actual chunk data
         let mut topology_views = Vec::new();
         let mut tasks = FuturesUnordered::new();
+        let record_kind = RecordKind::DataWithMerklePayment(data_type);
 
-        for peer_info in storing_nodes {
-            let peer_id = peer_info.peer_id;
+        for (peer_id, (peer_info, chunk)) in storing_node_to_chunk {
+            // Create a probe record with actual chunk data (content-addressed validation)
+            let chunk_address = *chunk.name();
+            let chunk_network_addr = NetworkAddress::ChunkAddress(*chunk.address());
+            let probe_proof = MerklePaymentProof {
+                address: chunk_address,
+                data_proof: create_dummy_merkle_branch(chunk_address)?,
+                winner_pool: probe_pool.clone(),
+            };
+
+            let record = Record {
+                key: chunk_network_addr.to_record_key(),
+                value: try_serialize_record(&(probe_proof, chunk), record_kind)
+                    .map_err(|e| {
+                        ConsensusError::Serialization(format!("Failed to serialize probe: {e:?}"))
+                    })?
+                    .to_vec(),
+                publisher: None,
+                expires: None,
+            };
+
             let network = self.network.clone();
-            let record = record.clone();
-
             tasks.push(async move {
                 let result = network.probe_for_topology(record, peer_info).await;
                 (peer_id, result)
@@ -470,7 +466,7 @@ impl Client {
     /// # Arguments
     /// * `midpoint_proof` - The midpoint proof
     /// * `midpoint_index` - Index of this midpoint
-    /// * `addresses` - All chunk addresses in the batch
+    /// * `chunks` - All chunks in the batch (with actual data for probing)
     /// * `depth` - Tree depth
     /// * `data_type` - The data type being uploaded
     /// * `data_size` - The data size
@@ -481,7 +477,7 @@ impl Client {
         &self,
         midpoint_proof: MidpointProof,
         midpoint_index: usize,
-        addresses: &[XorName],
+        chunks: &[Chunk],
         depth: u8,
         data_type: DataTypes,
         data_size: usize,
@@ -494,11 +490,11 @@ impl Client {
         );
 
         // Find all chunks that map to this midpoint
-        let chunks_for_midpoint: Vec<XorName> = addresses
+        let chunks_for_midpoint: Vec<Chunk> = chunks
             .iter()
             .enumerate()
             .filter(|(i, _)| leaf_to_midpoint_index(*i, depth) == midpoint_index)
-            .map(|(_, addr)| *addr)
+            .map(|(_, chunk)| chunk.clone())
             .collect();
 
         if chunks_for_midpoint.is_empty() {
@@ -553,7 +549,7 @@ impl Client {
     ///
     /// # Arguments
     /// * `midpoint_proofs` - The midpoint proofs from the merkle tree
-    /// * `addresses` - All chunk addresses in the batch
+    /// * `chunks` - All chunks in the batch (with actual data for probing)
     /// * `depth` - Tree depth
     /// * `data_type` - Data type for all items in batch
     /// * `data_size` - The per-record data size
@@ -563,15 +559,15 @@ impl Client {
     pub(crate) async fn build_consensus_candidate_pools(
         &self,
         midpoint_proofs: Vec<MidpointProof>,
-        addresses: &[XorName],
+        chunks: &[Chunk],
         depth: u8,
         data_type: DataTypes,
         data_size: usize,
     ) -> Result<Vec<MerklePaymentCandidatePool>, ConsensusError> {
         info!(
-            "Building consensus candidate pools for {} midpoints from {} addresses",
+            "Building consensus candidate pools for {} midpoints from {} chunks",
             midpoint_proofs.len(),
-            addresses.len()
+            chunks.len()
         );
 
         // Build all pools in parallel
@@ -581,13 +577,13 @@ impl Client {
                 .enumerate()
                 .map(|(midpoint_index, proof)| {
                     let client = self.clone();
-                    let addresses = addresses.to_vec();
+                    let chunks = chunks.to_vec();
                     async move {
                         client
                             .build_consensus_candidate_pool(
                                 proof,
                                 midpoint_index,
-                                &addresses,
+                                &chunks,
                                 depth,
                                 data_type,
                                 data_size,

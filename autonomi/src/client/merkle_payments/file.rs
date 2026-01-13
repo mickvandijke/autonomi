@@ -17,7 +17,7 @@ use crate::self_encryption::{EncryptionStream, MAX_CHUNK_SIZE, encrypt_directory
 use ant_evm::merkle_payments::MAX_LEAVES;
 use ant_evm::{AttoTokens, EvmWallet};
 use ant_protocol::NetworkAddress;
-use ant_protocol::storage::{ChunkAddress, DataTypes};
+use ant_protocol::storage::{Chunk, ChunkAddress, DataTypes};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use thiserror::Error;
@@ -145,9 +145,9 @@ impl Client {
             let batch_num = batch_idx + 1;
             debug!("Estimating batch {batch_num}/{num_batches}");
 
-            // Prepare batch (build tree, query pools)
-            let (tree, _candidate_pools, pool_commitments, merkle_payment_timestamp) = self
-                .prepare_merkle_batch(DataTypes::Chunk, batch_xornames, MAX_CHUNK_SIZE)
+            // Prepare batch for cost estimation (no consensus probing)
+            let (tree, pool_commitments, merkle_payment_timestamp) = self
+                .prepare_merkle_batch_for_cost(DataTypes::Chunk, batch_xornames, MAX_CHUNK_SIZE)
                 .await
                 .map_err(MerkleUploadError::Payment)?;
 
@@ -250,49 +250,102 @@ impl Client {
 
         let mut results: Vec<(PathBuf, DataMapChunk, Metadata)> = Vec::new();
 
-        // Interleaved pay/upload for each batch
-        for (batch_idx, batch_xornames) in batches.into_iter().enumerate() {
-            let batch_num = batch_idx + 1;
-            let batch_size = batch_xornames.len();
-            info!("Processing batch {batch_num}/{num_batches} ({batch_size} chunks)");
+        // Collect all chunks from streams, filtering out already existing
+        let mut all_chunks: Vec<Chunk> = Vec::new();
+        let upload_batch_size = std::cmp::max(1, *CHUNK_UPLOAD_BATCH_SIZE);
 
-            // Pay for this batch if needed
-            let needs_payment = batch_xornames
+        while let Some(stream) = streams.first_mut() {
+            match stream.next_batch(upload_batch_size) {
+                Some(chunks) if !chunks.is_empty() => {
+                    for chunk in chunks {
+                        if !already_exist.contains(chunk.name()) {
+                            all_chunks.push(chunk);
+                        }
+                    }
+                }
+                _ => {
+                    // Stream exhausted - harvest datamap and remove stream
+                    let exhausted_stream = streams.remove(0);
+                    let path = exhausted_stream.relative_path.clone();
+                    let metadata = exhausted_stream.metadata.clone();
+                    let datamap = exhausted_stream
+                        .data_map_chunk()
+                        .ok_or(MerkleUploadErrorWithReceipt::upload(
+                            receipt.clone(),
+                            MerklePutError::StreamShouldHaveDatamap,
+                        ))?;
+                    results.push((path, datamap, metadata));
+                }
+            }
+        }
+
+        // Split chunks into batches of MAX_LEAVES for merkle trees
+        let chunk_batches: Vec<Vec<Chunk>> = all_chunks
+            .chunks(MAX_LEAVES)
+            .map(|c| c.to_vec())
+            .collect();
+        let num_chunk_batches = chunk_batches.len();
+
+        // Process each batch: pay with consensus, then upload
+        for (batch_idx, batch_chunks) in chunk_batches.into_iter().enumerate() {
+            let batch_num = batch_idx + 1;
+            let batch_size = batch_chunks.len();
+            info!("Processing batch {batch_num}/{num_chunk_batches} ({batch_size} chunks)");
+
+            // Pay for this batch if needed (using actual chunk data for consensus)
+            let needs_payment = batch_chunks
                 .iter()
-                .any(|xn| !receipt.proofs.contains_key(xn));
+                .any(|c| !receipt.proofs.contains_key(c.name()));
             if needs_payment {
                 receipt = self
                     .pay_for_merkle_tree_batch(
                         wallet,
-                        batch_xornames,
+                        batch_chunks.clone(),
                         receipt.clone(),
                         batch_num,
-                        num_batches,
+                        num_chunk_batches,
                     )
                     .await
                     .map_err(|kind| MerkleUploadErrorWithReceipt::new(receipt.clone(), kind))?;
             }
 
             #[cfg(feature = "loud")]
-            println!("🌳 Merkle Tree {batch_num}/{num_batches}: Uploading {batch_size} chunks...");
+            println!("🌳 Merkle Tree {batch_num}/{num_chunk_batches}: Uploading {batch_size} chunks...");
 
-            // Upload this batch's chunks (skip chunks that already exist)
-            let upload_result = self
-                .upload_batch_with_merkle(streams, &receipt, &mut already_exist, batch_size)
-                .await
-                .map_err(|err| MerkleUploadErrorWithReceipt::upload(receipt.clone(), err))?;
+            // Upload this batch's chunks
+            let mut failed_chunks: Vec<(Chunk, String)> = Vec::new();
+            for chunk in &batch_chunks {
+                let xor_name = *chunk.name();
+                if already_exist.contains(&xor_name) {
+                    continue;
+                }
 
-            streams = upload_result.streams;
-            results.extend(upload_result.completed_files);
+                let proof = receipt
+                    .proofs
+                    .get(&xor_name)
+                    .ok_or(MerkleUploadErrorWithReceipt::upload(
+                        receipt.clone(),
+                        MerklePutError::MissingPaymentProofFor(xor_name),
+                    ))?;
+
+                match self.upload_chunk_with_merkle_proof(chunk, proof).await {
+                    Ok(_) => {
+                        already_exist.insert(xor_name);
+                    }
+                    Err(err) => {
+                        failed_chunks.push((chunk.clone(), err.to_string()));
+                    }
+                }
+            }
 
             // Retry failed chunks if any
-            if !upload_result.failed_chunks.is_empty() {
+            if !failed_chunks.is_empty() {
                 const MAX_RETRIES: usize = 3;
                 const RETRY_PAUSE_SECS: u64 = 60;
 
                 let remaining_failures = self
                     .retry_failed_merkle_chunks(
-                        upload_result.failed_chunks,
+                        failed_chunks,
                         &receipt,
                         &mut already_exist,
                         MAX_RETRIES,
@@ -314,7 +367,7 @@ impl Client {
             }
 
             info!(
-                "Batch {batch_num}/{num_batches} complete, {} files finished so far",
+                "Batch {batch_num}/{num_chunk_batches} complete, {} files finished so far",
                 results.len()
             );
         }
@@ -500,32 +553,32 @@ impl Client {
         (existing_set, new_chunks)
     }
 
-    /// Pay for a Merkle Tree batch, returning the merged receipt
+    /// Pay for a Merkle Tree batch using actual chunk data (for consensus probing).
     async fn pay_for_merkle_tree_batch(
         &self,
         wallet: Option<&EvmWallet>,
-        batch_xornames: Vec<XorName>,
+        batch_chunks: Vec<Chunk>,
         mut receipt: MerklePaymentReceipt,
         batch_num: usize,
         num_batches: usize,
     ) -> Result<MerklePaymentReceipt, MerkleUploadError> {
         // Need wallet to pay - error if Receipt variant (wallet is None)
         let w = wallet.ok_or_else(|| {
-            let missing_xn = batch_xornames
+            let missing_xn = batch_chunks
                 .iter()
+                .map(|c| *c.name())
                 .find(|xn| !receipt.proofs.contains_key(xn))
-                .copied()
                 .unwrap_or_default();
             MerkleUploadError::Upload(MerklePutError::MissingPaymentProofFor(missing_xn))
         })?;
 
-        let batch_size = batch_xornames.len();
-        debug!("Merkle Tree {batch_num}/{num_batches}: Paying for {batch_size} chunks...");
+        let batch_size = batch_chunks.len();
+        debug!("Merkle Tree {batch_num}/{num_batches}: Paying for {batch_size} chunks with consensus...");
         #[cfg(feature = "loud")]
-        println!("💸 Merkle Tree {batch_num}/{num_batches}: Paying for {batch_size} chunks...");
+        println!("💸 Merkle Tree {batch_num}/{num_batches}: Paying for {batch_size} chunks with consensus...");
 
         let batch_receipt = self
-            .pay_for_single_merkle_batch(DataTypes::Chunk, batch_xornames, MAX_CHUNK_SIZE, w)
+            .pay_for_single_merkle_batch(DataTypes::Chunk, batch_chunks, MAX_CHUNK_SIZE, w)
             .await
             .map_err(MerkleUploadError::Payment)?;
 

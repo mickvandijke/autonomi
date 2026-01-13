@@ -14,7 +14,7 @@ use ant_evm::{
         MAX_LEAVES, MerklePaymentCandidatePool, MerklePaymentProof, MerkleTree,
     },
 };
-use ant_protocol::storage::DataTypes;
+use ant_protocol::storage::{Chunk, DataTypes};
 use evmlib::merkle_batch_payment::PoolCommitment;
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -80,13 +80,14 @@ pub enum MerklePaymentError {
 }
 
 impl Client {
-    /// Pay for a batch of data addresses using Merkle payment and get the proofs
+    /// Pay for a batch of chunks using Merkle payment and get the proofs
     ///
-    /// Automatically splits large batches (>4096 addresses) into multiple Merkle trees.
+    /// Automatically splits large batches (>4096 chunks) into multiple Merkle trees.
+    /// Uses consensus-based merkle candidate selection where storing nodes must agree.
     ///
     /// # Arguments
     /// * `data_type` - The data type (must be same for all items)
-    /// * `content_addrs` - Iterator of XorName addresses
+    /// * `chunks` - Iterator of Chunk objects (with actual data for consensus probing)
     /// * `data_size` - The per-record data size that nodes will store (typically MAX_CHUNK_SIZE for chunks)
     /// * `wallet` - The EVM wallet to pay with
     ///
@@ -95,7 +96,7 @@ impl Client {
     pub async fn pay_for_merkle_batch(
         &self,
         data_type: DataTypes,
-        content_addrs: impl Iterator<Item = XorName>,
+        chunks: impl Iterator<Item = Chunk>,
         data_size: usize,
         wallet: &EvmWallet,
     ) -> Result<MerklePaymentReceipt, MerklePaymentError> {
@@ -103,13 +104,13 @@ impl Client {
             return Err(MerklePaymentError::EvmWalletNetworkMismatch);
         }
 
-        let addresses: Vec<XorName> = content_addrs.collect();
-        let batches: Vec<Vec<XorName>> = addresses.chunks(MAX_LEAVES).map(|c| c.to_vec()).collect();
+        let chunks: Vec<Chunk> = chunks.collect();
+        let batches: Vec<Vec<Chunk>> = chunks.chunks(MAX_LEAVES).map(|c| c.to_vec()).collect();
         let batches_len = batches.len();
-        let addresses_len = addresses.len();
+        let chunks_len = chunks.len();
         #[cfg(feature = "loud")]
-        println!("Paying for {addresses_len} addresses in {batches_len} batch(es)");
-        info!("Paying for {addresses_len} addresses in {batches_len} batch(es)");
+        println!("Paying for {chunks_len} chunks in {batches_len} batch(es)");
+        info!("Paying for {chunks_len} chunks in {batches_len} batch(es)");
 
         let mut merged_receipt = MerklePaymentReceipt::default();
         for (i, batch) in batches.into_iter().enumerate() {
@@ -125,6 +126,163 @@ impl Client {
         Ok(merged_receipt)
     }
 
+    /// Prepare a Merkle batch for cost estimation only (no consensus probing).
+    ///
+    /// This is a lightweight version that doesn't do consensus probing - it just
+    /// queries nodes close to midpoints to get pool commitments for cost estimation.
+    /// For actual payment, use `prepare_merkle_batch` which requires chunks and does
+    /// full consensus probing.
+    ///
+    /// Returns (tree, pool_commitments, timestamp)
+    pub(crate) async fn prepare_merkle_batch_for_cost(
+        &self,
+        data_type: DataTypes,
+        addresses: Vec<XorName>,
+        data_size: usize,
+    ) -> Result<(MerkleTree, Vec<PoolCommitment>, u64), MerklePaymentError> {
+        info!(
+            "Preparing Merkle batch for cost estimation: {} addresses with data_type {data_type:?}",
+            addresses.len()
+        );
+
+        // Pad to minimum 2 leaves if only 1 address
+        let addresses = match addresses[..] {
+            [only_one] => vec![only_one, only_one],
+            _ => addresses,
+        };
+
+        // Build Merkle tree
+        let tree = MerkleTree::from_xornames(addresses)?;
+        let depth = tree.depth();
+        info!("Built Merkle tree: depth={depth}");
+
+        // Get timestamp and reward candidates
+        let merkle_payment_timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        let midpoint_proofs = tree.reward_candidates(merkle_payment_timestamp)?;
+        info!("Generated {} midpoint proofs", midpoint_proofs.len());
+
+        // For cost estimation, we don't need consensus - just query closest nodes
+        // and use their view for pool commitments (estimation only)
+        let mut pool_commitments = Vec::with_capacity(midpoint_proofs.len());
+        for midpoint_proof in midpoint_proofs {
+            let pool = self
+                .build_candidate_pool_for_cost(midpoint_proof, data_type, data_size)
+                .await?;
+            pool_commitments.push(pool.to_commitment());
+        }
+
+        info!(
+            "Built {} pool commitments for cost estimation",
+            pool_commitments.len()
+        );
+
+        Ok((tree, pool_commitments, merkle_payment_timestamp))
+    }
+
+    /// Build a candidate pool for cost estimation (no consensus, just query closest).
+    async fn build_candidate_pool_for_cost(
+        &self,
+        midpoint_proof: ant_evm::merkle_payments::MidpointProof,
+        data_type: DataTypes,
+        data_size: usize,
+    ) -> Result<MerklePaymentCandidatePool, MerklePaymentError> {
+        use ant_protocol::storage::ChunkAddress;
+        use std::num::NonZero;
+
+        let midpoint_address = midpoint_proof.address();
+        let merkle_payment_timestamp = midpoint_proof.merkle_payment_timestamp;
+
+        // Get closest nodes to midpoint
+        let midpoint_network_addr =
+            crate::networking::NetworkAddress::ChunkAddress(ChunkAddress::new(midpoint_address));
+        let closest = self
+            .network
+            .get_closest_n_peers(
+                midpoint_network_addr,
+                NonZero::new(ant_protocol::CLOSE_GROUP_SIZE).expect("CLOSE_GROUP_SIZE is non-zero"),
+            )
+            .await?;
+
+        if closest.len() < ant_evm::merkle_payments::CANDIDATES_PER_POOL {
+            return Err(MerklePaymentError::Consensus(
+                super::consensus::ConsensusError::InsufficientResponses {
+                    got: closest.len(),
+                    needed: ant_evm::merkle_payments::CANDIDATES_PER_POOL,
+                },
+            ));
+        }
+
+        // Get quotes from closest nodes
+        let candidates = self
+            .build_consensus_candidate_pool_quotes_only(
+                &closest,
+                midpoint_address,
+                data_type,
+                data_size,
+                merkle_payment_timestamp,
+            )
+            .await?;
+
+        Ok(MerklePaymentCandidatePool {
+            midpoint_proof,
+            candidate_nodes: candidates,
+        })
+    }
+
+    /// Get quotes from nodes (helper for cost estimation).
+    async fn build_consensus_candidate_pool_quotes_only(
+        &self,
+        peers: &[libp2p::kad::PeerInfo],
+        midpoint_address: XorName,
+        data_type: DataTypes,
+        data_size: usize,
+        merkle_payment_timestamp: u64,
+    ) -> Result<[ant_evm::merkle_payments::MerklePaymentCandidateNode; ant_evm::merkle_payments::CANDIDATES_PER_POOL], MerklePaymentError> {
+        use ant_protocol::storage::ChunkAddress;
+        use futures::StreamExt;
+        use futures::stream::FuturesUnordered;
+
+        let network_addr =
+            crate::networking::NetworkAddress::ChunkAddress(ChunkAddress::new(midpoint_address));
+        let data_type_index = data_type.get_index();
+
+        let mut tasks = FuturesUnordered::new();
+        for peer_info in peers.iter().take(ant_evm::merkle_payments::CANDIDATES_PER_POOL + 4) {
+            let network = self.network.clone();
+            let network_addr = network_addr.clone();
+            let peer_info = peer_info.clone();
+
+            tasks.push(async move {
+                network
+                    .get_merkle_candidate_quote(
+                        network_addr,
+                        peer_info,
+                        data_type_index,
+                        data_size,
+                        merkle_payment_timestamp,
+                    )
+                    .await
+            });
+        }
+
+        let mut candidates = Vec::new();
+        while let Some(result) = tasks.next().await {
+            if let Ok(candidate) = result {
+                candidates.push(candidate);
+                if candidates.len() >= ant_evm::merkle_payments::CANDIDATES_PER_POOL {
+                    break;
+                }
+            }
+        }
+
+        candidates.try_into().map_err(|v: Vec<_>| {
+            MerklePaymentError::Consensus(super::consensus::ConsensusError::InsufficientResponses {
+                got: v.len(),
+                needed: ant_evm::merkle_payments::CANDIDATES_PER_POOL,
+            })
+        })
+    }
+
     /// Prepare a Merkle batch - builds tree, queries candidate pools using consensus
     ///
     /// This uses consensus-based merkle candidate selection where storing nodes
@@ -134,7 +292,7 @@ impl Client {
     pub(crate) async fn prepare_merkle_batch(
         &self,
         data_type: DataTypes,
-        addresses: Vec<XorName>,
+        chunks: Vec<Chunk>,
         data_size: usize,
     ) -> Result<
         (
@@ -146,20 +304,23 @@ impl Client {
         MerklePaymentError,
     > {
         info!(
-            "Preparing Merkle batch for {} addresses with data_type {data_type:?} using consensus",
-            addresses.len()
+            "Preparing Merkle batch for {} chunks with data_type {data_type:?} using consensus",
+            chunks.len()
         );
 
-        // Pad to minimum 2 leaves if only 1 address (rare edge case when N-1 of N chunks already exist)
+        // Extract addresses from chunks
+        let addresses: Vec<XorName> = chunks.iter().map(|c| *c.name()).collect();
+
+        // Pad to minimum 2 leaves if only 1 chunk (rare edge case when N-1 of N chunks already exist)
         // The duplicate leaf gets a different random salt, so the tree is valid.
         // Only the proof at index 0 is used (in pay_for_single_merkle_batch the original addresses
         // vector is used for proof generation, which has only 1 element).
-        let addresses = match addresses[..] {
-            [only_one] => vec![only_one, only_one],
-            _ => addresses,
+        let (addresses, chunks) = match addresses[..] {
+            [only_one] => (vec![only_one, only_one], vec![chunks[0].clone(), chunks[0].clone()]),
+            _ => (addresses, chunks),
         };
 
-        // Build Merkle tree (clone addresses since we need them later for consensus)
+        // Build Merkle tree
         let tree = MerkleTree::from_xornames(addresses.clone())?;
         let depth = tree.depth();
         info!("Built Merkle tree: depth={depth}");
@@ -173,7 +334,7 @@ impl Client {
         // This probes storing nodes (close to chunk addresses) to get their topology views
         // of merkle candidates (close to midpoint addresses) and builds consensus
         let candidate_pools = self
-            .build_consensus_candidate_pools(midpoint_proofs, &addresses, depth, data_type, data_size)
+            .build_consensus_candidate_pools(midpoint_proofs, &chunks, depth, data_type, data_size)
             .await?;
         info!(
             "Built {} consensus-based candidate pools",
@@ -194,17 +355,20 @@ impl Client {
         ))
     }
 
-    /// Pay for a single batch of up to MAX_LEAVES addresses
+    /// Pay for a single batch of up to MAX_LEAVES chunks
     pub(crate) async fn pay_for_single_merkle_batch(
         &self,
         data_type: DataTypes,
-        addresses: Vec<XorName>,
+        chunks: Vec<Chunk>,
         data_size: usize,
         wallet: &EvmWallet,
     ) -> Result<MerklePaymentReceipt, MerklePaymentError> {
-        // Prepare the batch (build tree, query pools)
+        // Extract addresses for proof generation
+        let addresses: Vec<XorName> = chunks.iter().map(|c| *c.name()).collect();
+
+        // Prepare the batch (build tree, query pools with actual chunks for consensus)
         let (tree, candidate_pools, pool_commitments, merkle_payment_timestamp) = self
-            .prepare_merkle_batch(data_type, addresses.clone(), data_size)
+            .prepare_merkle_batch(data_type, chunks, data_size)
             .await?;
         let depth = tree.depth();
 
