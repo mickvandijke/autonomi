@@ -45,6 +45,10 @@ use xor_name::XorName;
 /// A constant that defines the minimum number of common Merkle pool candidates required.
 const MIN_COMMON_MERKLE_CANDIDATES: usize = 8;
 
+/// Minimum number of nodes that must accept a chunk during probing for it to be considered already uploaded.
+/// This ensures data redundancy - we want at least a quorum of nodes to have the chunk.
+const MIN_NODES_ACCEPT_CHUNK: usize = 3;
+
 /// Errors that can occur during consensus-based merkle candidate selection
 #[derive(Debug, thiserror::Error)]
 pub enum ConsensusError {
@@ -123,7 +127,7 @@ impl Client {
     /// * `wallet` - The wallet to pay for probing
     ///
     /// # Returns
-    /// * (topology_views, accepted_chunks, probe_cost) - Topology views, chunks accepted during probing, and cost of probing
+    /// * (topology_views, accepted_chunks, probe_cost) - Topology views, chunks accepted by at least MIN_NODES_ACCEPT_CHUNK nodes during probing, and cost of probing
     pub(crate) async fn probe_all_storing_nodes_for_topology(
         &self,
         chunks: &[Chunk],
@@ -265,7 +269,7 @@ impl Client {
 
         // Step 7: Probe each storing node with paid proofs
         let mut topology_views = Vec::new();
-        let mut accepted_chunks = HashSet::new();
+        let mut chunk_acceptance_counts: HashMap<XorName, usize> = HashMap::new();
         let mut tasks = FuturesUnordered::new();
         let record_kind = RecordKind::DataWithMerklePayment(data_type);
 
@@ -300,16 +304,17 @@ impl Client {
             });
         }
 
-        // Collect topology views and track accepted chunks
+        // Collect topology views and track chunk acceptances
         while let Some((peer_id, chunk_address, result)) = tasks.next().await {
             match result {
                 Ok((chunk_addr, node_peers, accepted)) => {
                     if accepted {
-                        // Chunk was already accepted during probing - mark it to skip during upload
-                        info!(
-                            "Chunk {chunk_address:?} was accepted during probing by {peer_id:?} - will skip upload"
+                        // Chunk was accepted during probing - increment acceptance count
+                        let count = chunk_acceptance_counts.entry(chunk_addr).or_insert(0);
+                        *count += 1;
+                        debug!(
+                            "Chunk {chunk_address:?} was accepted during probing by {peer_id:?} (count: {count})"
                         );
-                        accepted_chunks.insert(chunk_addr);
                     } else {
                         // Normal topology view response
                         debug!(
@@ -330,8 +335,26 @@ impl Client {
             }
         }
 
+        // Only consider chunks that were accepted by at least MIN_NODES_ACCEPT_CHUNK nodes
+        let accepted_chunks: HashSet<XorName> = chunk_acceptance_counts
+            .into_iter()
+            .filter_map(|(chunk_addr, count)| {
+                if count >= MIN_NODES_ACCEPT_CHUNK {
+                    info!(
+                        "Chunk {chunk_addr:?} was accepted by {count} nodes (>= {MIN_NODES_ACCEPT_CHUNK}) - will skip upload"
+                    );
+                    Some(chunk_addr)
+                } else {
+                    debug!(
+                        "Chunk {chunk_addr:?} was accepted by only {count} nodes (< {MIN_NODES_ACCEPT_CHUNK}) - will still upload"
+                    );
+                    None
+                }
+            })
+            .collect();
+
         info!(
-            "Collected {} topology views and {} accepted chunks from storing nodes for midpoint {midpoint_address:?}",
+            "Collected {} topology views and {} accepted chunks (>= {MIN_NODES_ACCEPT_CHUNK} acceptances) from storing nodes for midpoint {midpoint_address:?}",
             topology_views.len(),
             accepted_chunks.len()
         );
@@ -1000,19 +1023,47 @@ impl Client {
             );
         }
 
-        // Step 2: Build consensus from topology views (skip if we have no views)
-        let (consensus_candidates, storing_nodes) = if topology_views.is_empty() {
+        // Step 2: Filter out topology views for chunks that were already accepted by enough nodes
+        // We don't need consensus for chunks that are already sufficiently replicated
+        let original_view_count = topology_views.len();
+        let filtered_topology_views: Vec<TopologyView> = topology_views
+            .into_iter()
+            .filter(|view| {
+                if accepted_chunks.contains(&view.chunk_address) {
+                    debug!(
+                        "Filtering out topology view for chunk {:?} - already accepted by enough nodes",
+                        view.chunk_address
+                    );
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect();
+
+        let filtered_count = filtered_topology_views.len();
+        if filtered_count < original_view_count {
+            info!(
+                "Filtered topology views: {} remaining after removing {} views for accepted chunks",
+                filtered_count,
+                original_view_count - filtered_count
+            );
+        }
+
+        // Step 3: Build consensus from filtered topology views (skip if we have no views)
+        let (consensus_candidates, storing_nodes) = if filtered_topology_views.is_empty() {
             // All chunks were accepted, no topology views to build consensus from
             // Return empty consensus data - we won't need to upload anything
+            info!("No topology views remaining after filtering - all chunks were accepted during probing");
             (Vec::new(), HashMap::new())
         } else {
-            self.build_consensus_candidates(&topology_views)?
+            self.build_consensus_candidates(&filtered_topology_views)?
         };
 
-        // Step 3: Get actual signed quotes from consensus candidates
+        // Step 4: Get actual signed quotes from consensus candidates
         // We need consensus candidates even if some chunks were accepted during probing,
         // because the merkle tree payment requires valid candidate pools
-        let candidate_nodes = if topology_views.is_empty() {
+        let candidate_nodes = if filtered_topology_views.is_empty() {
             // All chunks were accepted during probing - we still need to build a minimal candidate pool
             // Use a simple non-consensus approach to get candidates for the midpoint
             warn!("All chunks accepted during probing, falling back to non-consensus candidate selection");
@@ -1045,7 +1096,7 @@ impl Client {
             .await?
         };
 
-        // Step 4: Build the pool
+        // Step 5: Build the pool
         let pool = MerklePaymentCandidatePool {
             midpoint_proof,
             candidate_nodes,
