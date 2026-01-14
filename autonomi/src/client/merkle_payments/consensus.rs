@@ -119,30 +119,6 @@ fn leaf_to_midpoint_index(leaf_index: usize, depth: u8) -> usize {
     leaf_index / leaves_per_midpoint
 }
 
-/// Generate a probe address that is close to but not exactly the midpoint.
-///
-/// This creates an address suitable for peer discovery that will still pass
-/// the `verify_paid_nodes_distance` check when validated against the midpoint.
-///
-/// The probe address has:
-/// - A minimum XOR distance of 256 from the midpoint (not "too close")
-/// - A small enough distance to remain within the 10x tolerance
-///   used in `verify_paid_nodes_distance` validation
-///
-/// # Why not use the midpoint directly?
-/// Using a slightly offset address (at least 255 distance) prevents the query
-/// from targeting exactly the midpoint, while still finding peers that are
-/// within the validation tolerance of the actual midpoint address.
-fn generate_probe_address(midpoint: XorName) -> XorName {
-    let mut bytes = midpoint.0;
-    // XOR byte[30] with 1 to create a distance of exactly 256 (2^8).
-    // This ensures:
-    // - At least 255 distance as required (not "too close")
-    // - Well within the 10x tolerance used in verify_paid_nodes_distance
-    bytes[30] ^= 0x01;
-    XorName(bytes)
-}
-
 impl Client {
     /// Probe storing nodes from ALL chunks that map to a midpoint.
     ///
@@ -441,11 +417,7 @@ impl Client {
         let midpoint_address = midpoint_proof.address();
         let merkle_payment_timestamp = midpoint_proof.merkle_payment_timestamp;
 
-        // Generate a probe address that's close to but not exactly the midpoint.
-        // This will still pass the verify_paid_nodes_distance check on the node side
-        // (which uses 10x tolerance) while not targeting the exact midpoint.
-        let probe_address = generate_probe_address(midpoint_address);
-        let probe_network_addr = NetworkAddress::ChunkAddress(ChunkAddress::new(probe_address));
+        let probe_network_addr = NetworkAddress::ChunkAddress(ChunkAddress::new(midpoint_address));
 
         let closest = self
             .network
@@ -958,7 +930,10 @@ impl Client {
             if let Some(peer_info) = result {
                 peer_infos.push(peer_info);
             } else {
-                warn!("Could not find peer info for consensus candidate {peer_id:?} after {} attempts", MAX_REQUEST_RETRIES + 1);
+                warn!(
+                    "Could not find peer info for consensus candidate {peer_id:?} after {} attempts",
+                    MAX_REQUEST_RETRIES + 1
+                );
             }
         }
 
