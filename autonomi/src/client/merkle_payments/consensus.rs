@@ -29,8 +29,8 @@ use ant_evm::merkle_payments::{
     MerklePaymentProof, MerkleTree, MidpointProof,
 };
 use ant_evm::{AttoTokens, EvmWallet};
-use ant_protocol::NetworkAddress;
 use ant_protocol::storage::{Chunk, ChunkAddress, DataTypes, RecordKind, try_serialize_record};
+use ant_protocol::{CLOSE_GROUP_SIZE, NetworkAddress};
 use evmlib::merkle_batch_payment::PoolCommitment;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -153,7 +153,7 @@ impl Client {
                 .network
                 .get_closest_n_peers(
                     chunk_network_addr.clone(),
-                    NonZero::new(CANDIDATES_PER_POOL + 4).expect("CLOSE_GROUP_SIZE is non-zero"),
+                    NonZero::new(CLOSE_GROUP_SIZE + 2).expect("CLOSE_GROUP_SIZE is non-zero"),
                 )
                 .await?;
 
@@ -1061,7 +1061,9 @@ impl Client {
         let (consensus_candidates, storing_nodes) = if filtered_topology_views.is_empty() {
             // All chunks were accepted, no topology views to build consensus from
             // Return empty consensus data - we won't need to upload anything
-            info!("No topology views remaining after filtering - all chunks were accepted during probing");
+            info!(
+                "No topology views remaining after filtering - all chunks were accepted during probing"
+            );
             #[cfg(feature = "loud")]
             println!(
                 "✓ Midpoint {midpoint_index}: All {} chunks already replicated during probing",
@@ -1085,7 +1087,9 @@ impl Client {
         let candidate_nodes = if filtered_topology_views.is_empty() {
             // All chunks were accepted during probing - we still need to build a minimal candidate pool
             // Use a simple non-consensus approach to get candidates for the midpoint
-            warn!("All chunks accepted during probing, falling back to non-consensus candidate selection");
+            warn!(
+                "All chunks accepted during probing, falling back to non-consensus candidate selection"
+            );
             let midpoint_network_addr =
                 NetworkAddress::ChunkAddress(ChunkAddress::new(midpoint_address));
             let closest = self
@@ -1210,13 +1214,16 @@ impl Client {
             let total_chunks = chunks_needing_consensus + chunks_already_replicated;
             println!(
                 "📊 Consensus Summary: {}/{} chunks need upload, {} already replicated",
-                chunks_needing_consensus,
-                total_chunks,
-                chunks_already_replicated
+                chunks_needing_consensus, total_chunks, chunks_already_replicated
             );
         }
 
-        Ok((pools, all_storing_nodes, all_accepted_chunks, total_probe_cost))
+        Ok((
+            pools,
+            all_storing_nodes,
+            all_accepted_chunks,
+            total_probe_cost,
+        ))
     }
 }
 
