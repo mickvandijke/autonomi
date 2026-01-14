@@ -44,7 +44,7 @@ use ant_protocol::constants::{
 };
 
 /// Libp2p defaults to 10s which is quite fast, we are more patient
-pub const REQ_TIMEOUT: Duration = Duration::from_secs(30);
+pub const REQ_TIMEOUT: Duration = Duration::from_secs(120);
 /// Libp2p defaults to 60s for kad queries, we are more patient
 pub const KAD_QUERY_TIMEOUT: Duration = Duration::from_secs(120);
 /// Libp2p defaults to 3, we are more aggressive
