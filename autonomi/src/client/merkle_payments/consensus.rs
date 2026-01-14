@@ -53,8 +53,12 @@ const CONSENSUS_THRESHOLDS: [usize; 4] = [16, 12, 10, 8];
 const MIN_NODES_ACCEPT_CHUNK: usize = 3;
 
 /// Maximum number of concurrent network requests during consensus operations.
-/// This limits network load during probing, peer lookups, and quote requests.
-const MAX_CONCURRENT_REQUESTS: usize = 4;
+/// This limits network load during peer lookups and quote requests.
+const MAX_CONCURRENT_REQUESTS: usize = 8;
+
+/// Maximum number of concurrent probing requests.
+/// Probing is serialized to avoid overwhelming the network.
+const MAX_CONCURRENT_PROBES: usize = 2;
 
 /// Maximum number of retries for network requests (peer info lookups and quote requests).
 const MAX_REQUEST_RETRIES: usize = 2;
@@ -325,11 +329,11 @@ impl Client {
         info!(
             "Probing {} storing nodes with max {} concurrent requests",
             tasks.len(),
-            MAX_CONCURRENT_REQUESTS
+            MAX_CONCURRENT_PROBES
         );
 
-        // Collect topology views and track chunk acceptances (with limited concurrency)
-        let mut probe_stream = stream::iter(tasks).buffer_unordered(MAX_CONCURRENT_REQUESTS);
+        // Collect topology views and track chunk acceptances (serialized probing)
+        let mut probe_stream = stream::iter(tasks).buffer_unordered(MAX_CONCURRENT_PROBES);
         while let Some((peer_id, chunk_address, result)) = probe_stream.next().await {
             match result {
                 Ok((chunk_addr, node_peers, accepted)) => {
