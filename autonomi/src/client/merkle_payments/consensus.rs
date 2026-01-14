@@ -539,6 +539,13 @@ impl Client {
             selected_storing_nodes.len()
         );
 
+        #[cfg(feature = "loud")]
+        println!(
+            "✓ Consensus found: {} merkle candidates agreed upon by storing nodes for {} chunks",
+            final_candidates.len(),
+            selected_storing_nodes.len()
+        );
+
         Ok((final_candidates, selected_storing_nodes))
     }
 
@@ -1055,9 +1062,21 @@ impl Client {
             // All chunks were accepted, no topology views to build consensus from
             // Return empty consensus data - we won't need to upload anything
             info!("No topology views remaining after filtering - all chunks were accepted during probing");
+            #[cfg(feature = "loud")]
+            println!(
+                "✓ Midpoint {midpoint_index}: All {} chunks already replicated during probing",
+                accepted_chunks.len()
+            );
             (Vec::new(), HashMap::new())
         } else {
-            self.build_consensus_candidates(&filtered_topology_views)?
+            let result = self.build_consensus_candidates(&filtered_topology_views)?;
+            #[cfg(feature = "loud")]
+            println!(
+                "✓ Midpoint {midpoint_index}: Consensus found for {} chunks ({} already replicated)",
+                result.1.len(),
+                accepted_chunks.len()
+            );
+            result
         };
 
         // Step 4: Get actual signed quotes from consensus candidates
@@ -1183,6 +1202,19 @@ impl Client {
             pools.len(),
             all_accepted_chunks.len()
         );
+
+        #[cfg(feature = "loud")]
+        {
+            let chunks_needing_consensus = all_storing_nodes.len();
+            let chunks_already_replicated = all_accepted_chunks.len();
+            let total_chunks = chunks_needing_consensus + chunks_already_replicated;
+            println!(
+                "📊 Consensus Summary: {}/{} chunks need upload, {} already replicated",
+                chunks_needing_consensus,
+                total_chunks,
+                chunks_already_replicated
+            );
+        }
 
         Ok((pools, all_storing_nodes, all_accepted_chunks, total_probe_cost))
     }
