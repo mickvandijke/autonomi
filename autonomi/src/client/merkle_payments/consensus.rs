@@ -30,7 +30,7 @@ use ant_evm::merkle_payments::{
 };
 use ant_evm::{AttoTokens, EvmWallet};
 use ant_protocol::storage::{Chunk, ChunkAddress, DataTypes, RecordKind, try_serialize_record};
-use ant_protocol::{CLOSE_GROUP_SIZE, NetworkAddress};
+use ant_protocol::NetworkAddress;
 use evmlib::merkle_batch_payment::PoolCommitment;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -511,12 +511,12 @@ impl Client {
             let combinations = Self::generate_valid_combinations(chunk_views, required_views);
             if combinations.is_empty() {
                 warn!(
-                    "No valid {required_views}-view combinations for chunk {chunk_addr:?} with {} views ({acceptance_count} already accepted)",
+                    "No valid combinations for chunk {chunk_addr:?}: need {required_views} views (3 - {acceptance_count} accepted), have {} views",
                     chunk_views.len()
                 );
             } else {
                 debug!(
-                    "Chunk {chunk_addr:?}: {} valid {required_views}-view combinations from {} views ({acceptance_count} already accepted)",
+                    "Chunk {chunk_addr:?}: {} valid {required_views}-view combinations from {} views (3 - {acceptance_count} accepted = {required_views} needed)",
                     combinations.len(),
                     chunk_views.len()
                 );
