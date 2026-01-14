@@ -52,9 +52,9 @@ const CONSENSUS_THRESHOLDS: [usize; 4] = [16, 12, 10, 8];
 /// This ensures data redundancy - we want at least a quorum of nodes to have the chunk.
 const MIN_NODES_ACCEPT_CHUNK: usize = 3;
 
-/// Maximum number of concurrent probe requests during topology discovery.
-/// This limits network load during the probing phase.
-const MAX_CONCURRENT_PROBES: usize = 2;
+/// Maximum number of concurrent network requests during consensus operations.
+/// This limits network load during probing, peer lookups, and quote requests.
+const MAX_CONCURRENT_REQUESTS: usize = 8;
 
 /// Errors that can occur during consensus-based merkle candidate selection
 #[derive(Debug, thiserror::Error)]
@@ -306,7 +306,7 @@ impl Client {
             chunk_proofs.insert(*address, payment_proof);
         }
 
-        // Step 7: Probe each storing node with paid proofs (limited to MAX_CONCURRENT_PROBES at a time)
+        // Step 7: Probe each storing node with paid proofs (limited to MAX_CONCURRENT_REQUESTS at a time)
         let mut topology_views = Vec::new();
         let mut chunk_acceptance_counts: HashMap<XorName, usize> = HashMap::new();
         let mut tasks = Vec::new();
@@ -346,11 +346,11 @@ impl Client {
         info!(
             "Probing {} storing nodes with max {} concurrent requests",
             tasks.len(),
-            MAX_CONCURRENT_PROBES
+            MAX_CONCURRENT_REQUESTS
         );
 
         // Collect topology views and track chunk acceptances (with limited concurrency)
-        let mut probe_stream = stream::iter(tasks).buffer_unordered(MAX_CONCURRENT_PROBES);
+        let mut probe_stream = stream::iter(tasks).buffer_unordered(MAX_CONCURRENT_REQUESTS);
         while let Some((peer_id, chunk_address, result)) = probe_stream.next().await {
             match result {
                 Ok((chunk_addr, node_peers, accepted)) => {
@@ -442,8 +442,7 @@ impl Client {
         // This will still pass the verify_paid_nodes_distance check on the node side
         // (which uses 10x tolerance) while not targeting the exact midpoint.
         let probe_address = generate_probe_address(midpoint_address);
-        let probe_network_addr =
-            NetworkAddress::ChunkAddress(ChunkAddress::new(probe_address));
+        let probe_network_addr = NetworkAddress::ChunkAddress(ChunkAddress::new(probe_address));
 
         let closest = self
             .network
@@ -911,10 +910,21 @@ impl Client {
     ) -> Result<[MerklePaymentCandidateNode; CANDIDATES_PER_POOL], ConsensusError> {
         let network_addr = NetworkAddress::ChunkAddress(ChunkAddress::new(midpoint_address));
 
-        // Get PeerInfo for each consensus candidate
+        // Get PeerInfo for each consensus candidate in parallel (limited concurrency)
+        let peer_info_futures = peer_ids.iter().map(|peer_id| {
+            let network = self.network.clone();
+            let peer_id = *peer_id;
+            async move {
+                let peer_info = network.get_peer_info(peer_id).await;
+                (peer_id, peer_info)
+            }
+        });
+
         let mut peer_infos = Vec::with_capacity(peer_ids.len());
-        for peer_id in peer_ids {
-            if let Some(peer_info) = self.network.get_peer_info(*peer_id).await {
+        let mut peer_info_stream =
+            stream::iter(peer_info_futures).buffer_unordered(MAX_CONCURRENT_REQUESTS);
+        while let Some((peer_id, result)) = peer_info_stream.next().await {
+            if let Some(peer_info) = result {
                 peer_infos.push(peer_info);
             } else {
                 warn!("Could not find peer info for consensus candidate {peer_id:?}");
@@ -929,16 +939,14 @@ impl Client {
             )));
         }
 
-        // Request quotes from consensus candidates in parallel
-        let mut tasks = FuturesUnordered::new();
+        // Request quotes from consensus candidates in parallel (limited concurrency)
         let data_type_index = data_type.get_index();
-
-        for peer_info in peer_infos {
+        let quote_futures = peer_infos.into_iter().map(|peer_info| {
             let network = self.network.clone();
             let network_addr = network_addr.clone();
             let peer_id = peer_info.peer_id;
 
-            tasks.push(async move {
+            async move {
                 let result = network
                     .get_merkle_candidate_quote(
                         network_addr,
@@ -949,12 +957,14 @@ impl Client {
                     )
                     .await;
                 (peer_id, result)
-            });
-        }
+            }
+        });
 
         // Collect successful responses
         let mut candidates: Vec<MerklePaymentCandidateNode> = Vec::new();
-        while let Some((peer_id, result)) = tasks.next().await {
+        let mut quote_stream =
+            stream::iter(quote_futures).buffer_unordered(MAX_CONCURRENT_REQUESTS);
+        while let Some((peer_id, result)) = quote_stream.next().await {
             match result {
                 Ok(candidate) => {
                     candidates.push(candidate);
