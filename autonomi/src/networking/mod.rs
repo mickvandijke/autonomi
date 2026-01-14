@@ -1049,14 +1049,16 @@ impl Network {
     /// * `peer` - The peer to probe
     ///
     /// # Returns
-    /// * `Ok(Vec<PeerId>)` - The peer's view of closest nodes to the midpoint
+    /// * `Ok((XorName, Vec<PeerId>, bool))` - Chunk address, topology view, and whether chunk was accepted
+    ///   - If accepted=true, the chunk was already stored and the topology view will be empty
+    ///   - If accepted=false, topology verification failed and the view contains the node's closest peers
     /// * `Err(NetworkError)` - If the probe fails for a reason other than topology mismatch
     pub async fn probe_for_topology(
         &self,
         chunk_address: XorName,
         record: Record,
         peer: PeerInfo,
-    ) -> Result<(XorName, Vec<PeerId>), NetworkError> {
+    ) -> Result<(XorName, Vec<PeerId>, bool), NetworkError> {
         const MAX_RETRIES: u8 = 2;
         let mut last_error = None;
 
@@ -1064,16 +1066,14 @@ impl Network {
             let result = self.put_record_req(record.clone(), peer.clone()).await;
 
             match result {
-                // If the record was accepted, the topology matched (unlikely for probe)
+                // If the record was accepted, the chunk is already stored (or topology matched)
                 Ok(()) => {
                     debug!(
-                        "Probe to {:?} unexpectedly succeeded - topology matched",
+                        "Probe to {:?} succeeded - chunk was accepted (already stored or topology matched)",
                         peer.peer_id
                     );
-                    // Return empty - we don't have topology info since it succeeded
-                    return Err(NetworkError::PutRecordRejected(
-                        "Probe unexpectedly succeeded - topology matched".to_string(),
-                    ));
+                    // Return empty topology with accepted=true to indicate early success
+                    return Ok((chunk_address, Vec::new(), true));
                 }
                 // This is what we expect - extract the node's topology view
                 Err(NetworkError::TopologyVerificationFailed { node_peers, .. }) => {
@@ -1082,7 +1082,7 @@ impl Network {
                         peer.peer_id,
                         node_peers.len()
                     );
-                    return Ok((chunk_address, node_peers));
+                    return Ok((chunk_address, node_peers, false));
                 }
                 // Any other error - retry up to MAX_RETRIES times
                 Err(e) => {

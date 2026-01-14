@@ -297,7 +297,7 @@ impl Client {
                 .iter()
                 .any(|c| !receipt.proofs.contains_key(c.name()));
             if needs_payment {
-                receipt = self
+                let (new_receipt, accepted_chunks) = self
                     .pay_for_merkle_tree_batch(
                         wallet,
                         batch_chunks.clone(),
@@ -307,6 +307,10 @@ impl Client {
                     )
                     .await
                     .map_err(|kind| MerkleUploadErrorWithReceipt::new(receipt.clone(), kind))?;
+
+                // Add accepted chunks (already stored during probing) to skip set
+                already_exist.extend(accepted_chunks);
+                receipt = new_receipt;
             }
 
             #[cfg(feature = "loud")]
@@ -561,6 +565,7 @@ impl Client {
     }
 
     /// Pay for a Merkle Tree batch using actual chunk data (for consensus probing).
+    /// Returns (receipt, accepted_chunks) where accepted_chunks were already stored during probing.
     async fn pay_for_merkle_tree_batch(
         &self,
         wallet: Option<&EvmWallet>,
@@ -568,7 +573,7 @@ impl Client {
         mut receipt: MerklePaymentReceipt,
         batch_num: usize,
         num_batches: usize,
-    ) -> Result<MerklePaymentReceipt, MerkleUploadError> {
+    ) -> Result<(MerklePaymentReceipt, HashSet<XorName>), MerkleUploadError> {
         // Need wallet to pay - error if Receipt variant (wallet is None)
         let w = wallet.ok_or_else(|| {
             let missing_xn = batch_chunks
@@ -584,13 +589,13 @@ impl Client {
         #[cfg(feature = "loud")]
         println!("💸 Merkle Tree {batch_num}/{num_batches}: Paying for {batch_size} chunks with consensus...");
 
-        let batch_receipt = self
+        let (batch_receipt, accepted_chunks) = self
             .pay_for_single_merkle_batch(DataTypes::Chunk, batch_chunks, MAX_CHUNK_SIZE, w)
             .await
             .map_err(MerkleUploadError::Payment)?;
 
         receipt.merge(batch_receipt);
-        Ok(receipt)
+        Ok((receipt, accepted_chunks))
     }
 
     /// Send upload completion event

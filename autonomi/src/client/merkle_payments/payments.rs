@@ -14,7 +14,7 @@ use ant_evm::{
 };
 use ant_protocol::storage::{Chunk, DataTypes};
 use evmlib::merkle_batch_payment::PoolCommitment;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, info};
 use xor_name::XorName;
@@ -162,9 +162,11 @@ impl Client {
             #[cfg(feature = "loud")]
             println!("Processing batch {}/{batches_len}", i + 1);
             info!("Processing batch {}/{batches_len}", i + 1);
-            let receipt = self
+            let (receipt, _accepted_chunks) = self
                 .pay_for_single_merkle_batch(data_type, batch, data_size, wallet)
                 .await?;
+            // Note: accepted_chunks are ignored here since this is a simplified API
+            // The full upload flow in file.rs handles accepted chunks properly
             merged_receipt.merge(receipt);
         }
 
@@ -351,7 +353,7 @@ impl Client {
     /// Probing for consensus requires on-chain payments. The probe cost is returned
     /// separately so it can be included in the total amount paid.
     ///
-    /// Returns (tree, candidate_pools, pool_commitments, storing_nodes, timestamp, probe_cost)
+    /// Returns (tree, candidate_pools, pool_commitments, storing_nodes, accepted_chunks, timestamp, probe_cost)
     pub(crate) async fn prepare_merkle_batch(
         &self,
         data_type: DataTypes,
@@ -364,6 +366,7 @@ impl Client {
             Vec<MerklePaymentCandidatePool>,
             Vec<PoolCommitment>,
             HashMap<XorName, Vec<libp2p::PeerId>>,
+            HashSet<XorName>,
             u64,
             AttoTokens,
         ),
@@ -403,7 +406,8 @@ impl Client {
         // This probes storing nodes (close to chunk addresses) to get their topology views
         // of merkle candidates (close to midpoint addresses) and builds consensus.
         // Probing requires on-chain payments which are included in probe_cost.
-        let (candidate_pools, storing_nodes, probe_cost) = self
+        // Some chunks may be accepted during probing and should be skipped during upload.
+        let (candidate_pools, storing_nodes, accepted_chunks, probe_cost) = self
             .build_consensus_candidate_pools(
                 midpoint_proofs,
                 &chunks,
@@ -414,8 +418,9 @@ impl Client {
             )
             .await?;
         info!(
-            "Built {} consensus-based candidate pools, probe cost: {probe_cost}",
-            candidate_pools.len()
+            "Built {} consensus-based candidate pools with {} chunks accepted during probing, probe cost: {probe_cost}",
+            candidate_pools.len(),
+            accepted_chunks.len()
         );
 
         // Convert to pool commitments
@@ -429,6 +434,7 @@ impl Client {
             candidate_pools,
             pool_commitments,
             storing_nodes,
+            accepted_chunks,
             merkle_payment_timestamp,
             probe_cost,
         ))
@@ -437,22 +443,28 @@ impl Client {
     /// Pay for a single batch of up to MAX_LEAVES chunks
     ///
     /// This includes both the probe cost (for consensus discovery) and the main payment.
+    /// Returns (receipt, accepted_chunks) where accepted_chunks were already stored during probing.
     pub(crate) async fn pay_for_single_merkle_batch(
         &self,
         data_type: DataTypes,
         chunks: Vec<Chunk>,
         data_size: usize,
         wallet: &EvmWallet,
-    ) -> Result<MerklePaymentReceipt, MerklePaymentError> {
+    ) -> Result<(MerklePaymentReceipt, HashSet<XorName>), MerklePaymentError> {
         // Extract addresses for proof generation
         let addresses: Vec<XorName> = chunks.iter().map(|c| *c.name()).collect();
 
         // Prepare the batch (build tree, query pools with actual chunks for consensus)
         // This includes paid probing for consensus discovery
-        let (tree, candidate_pools, pool_commitments, storing_nodes, merkle_payment_timestamp, probe_cost) = self
+        // Some chunks may be accepted during probing - these should be marked as already uploaded
+        let (tree, candidate_pools, pool_commitments, storing_nodes, accepted_chunks, merkle_payment_timestamp, probe_cost) = self
             .prepare_merkle_batch(data_type, chunks, data_size, wallet)
             .await?;
         let depth = tree.depth();
+
+        if !accepted_chunks.is_empty() {
+            info!("{} chunks were accepted during probing and will be skipped during upload", accepted_chunks.len());
+        }
 
         // Submit main payment to smart contract
         debug!("Waiting for wallet lock");
@@ -503,9 +515,10 @@ impl Client {
         };
 
         info!(
-            "Generated {} Merkle payment proofs, total amount: {total_amount}",
-            receipt.proofs.len()
+            "Generated {} Merkle payment proofs with {} chunks accepted during probing, total amount: {total_amount}",
+            receipt.proofs.len(),
+            accepted_chunks.len()
         );
-        Ok(receipt)
+        Ok((receipt, accepted_chunks))
     }
 }
