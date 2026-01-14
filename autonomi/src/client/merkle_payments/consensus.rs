@@ -54,7 +54,7 @@ const MIN_NODES_ACCEPT_CHUNK: usize = 3;
 
 /// Maximum number of concurrent network requests during consensus operations.
 /// This limits network load during probing, peer lookups, and quote requests.
-const MAX_CONCURRENT_REQUESTS: usize = 8;
+const MAX_CONCURRENT_REQUESTS: usize = 4;
 
 /// Maximum number of retries for network requests (peer info lookups and quote requests).
 const MAX_REQUEST_RETRIES: usize = 2;
