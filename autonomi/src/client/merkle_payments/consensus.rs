@@ -610,14 +610,8 @@ impl Client {
         }
 
         if n < required_views {
-            // Not enough views for a full combination, use all available
-            if !views.is_empty() {
-                let indices: Vec<usize> = (0..n).collect();
-                let common = Self::intersect_views(views, &indices);
-                if !common.is_empty() {
-                    valid.push((indices, common));
-                }
-            }
+            // Not enough views to form a valid combination - return empty
+            // This is expected when most probes fail; consensus cannot be reached
             return valid;
         }
 
