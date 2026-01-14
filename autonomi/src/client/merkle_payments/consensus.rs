@@ -50,7 +50,7 @@ const MIN_NODES_ACCEPT_CHUNK: usize = 3;
 
 /// Maximum number of concurrent probe requests during topology discovery.
 /// This limits network load during the probing phase.
-const MAX_CONCURRENT_PROBES: usize = 4;
+const MAX_CONCURRENT_PROBES: usize = 2;
 
 /// Errors that can occur during consensus-based merkle candidate selection
 #[derive(Debug, thiserror::Error)]
@@ -516,17 +516,16 @@ impl Client {
             let required_views = *required_views_per_chunk
                 .get(chunk_addr)
                 .unwrap_or(&MIN_NODES_ACCEPT_CHUNK);
-            let acceptance_count = acceptance_counts.get(chunk_addr).copied().unwrap_or(0);
 
             let combinations = Self::generate_valid_combinations(chunk_views, required_views);
             if combinations.is_empty() {
                 warn!(
-                    "No valid combinations for chunk {chunk_addr:?}: need {required_views} views (3 - {acceptance_count} accepted), have {} views",
+                    "No valid {required_views}-view combinations for chunk {chunk_addr:?}. have {} views",
                     chunk_views.len()
                 );
             } else {
                 debug!(
-                    "Chunk {chunk_addr:?}: {} valid {required_views}-view combinations from {} views (3 - {acceptance_count} accepted = {required_views} needed)",
+                    "Chunk {chunk_addr:?}: {} valid {required_views}-view combinations from {} views",
                     combinations.len(),
                     chunk_views.len()
                 );
