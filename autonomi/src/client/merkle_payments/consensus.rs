@@ -32,7 +32,7 @@ use ant_evm::{AttoTokens, EvmWallet};
 use ant_protocol::storage::{Chunk, ChunkAddress, DataTypes, RecordKind, try_serialize_record};
 use ant_protocol::{CLOSE_GROUP_SIZE, NetworkAddress};
 use evmlib::merkle_batch_payment::PoolCommitment;
-use futures::stream::{self, FuturesUnordered, StreamExt};
+use futures::stream::{self, StreamExt};
 use libp2p::PeerId;
 use libp2p::kad::{PeerInfo, Record};
 use std::collections::{HashMap, HashSet};
@@ -55,6 +55,9 @@ const MIN_NODES_ACCEPT_CHUNK: usize = 3;
 /// Maximum number of concurrent network requests during consensus operations.
 /// This limits network load during probing, peer lookups, and quote requests.
 const MAX_CONCURRENT_REQUESTS: usize = 8;
+
+/// Maximum number of retries for quote requests.
+const MAX_QUOTE_RETRIES: usize = 2;
 
 /// Errors that can occur during consensus-based merkle candidate selection
 #[derive(Debug, thiserror::Error)]
@@ -939,7 +942,7 @@ impl Client {
             )));
         }
 
-        // Request quotes from consensus candidates in parallel (limited concurrency)
+        // Request quotes from consensus candidates in parallel (limited concurrency, with retries)
         let data_type_index = data_type.get_index();
         let quote_futures = peer_infos.into_iter().map(|peer_info| {
             let network = self.network.clone();
@@ -947,16 +950,31 @@ impl Client {
             let peer_id = peer_info.peer_id;
 
             async move {
-                let result = network
-                    .get_merkle_candidate_quote(
-                        network_addr,
-                        peer_info,
-                        data_type_index,
-                        data_size,
-                        merkle_payment_timestamp,
-                    )
-                    .await;
-                (peer_id, result)
+                let mut last_err = None;
+                for attempt in 0..=MAX_QUOTE_RETRIES {
+                    match network
+                        .get_merkle_candidate_quote(
+                            network_addr.clone(),
+                            peer_info.clone(),
+                            data_type_index,
+                            data_size,
+                            merkle_payment_timestamp,
+                        )
+                        .await
+                    {
+                        Ok(candidate) => return (peer_id, Ok(candidate)),
+                        Err(e) => {
+                            if attempt < MAX_QUOTE_RETRIES {
+                                debug!(
+                                    "Quote request to {peer_id:?} failed (attempt {}), retrying: {e}",
+                                    attempt + 1
+                                );
+                            }
+                            last_err = Some(e);
+                        }
+                    }
+                }
+                (peer_id, Err(last_err.expect("loop ran at least once")))
             }
         });
 
@@ -1007,30 +1025,46 @@ impl Client {
         let network_addr = NetworkAddress::ChunkAddress(ChunkAddress::new(midpoint_address));
         let data_type_index = data_type.get_index();
 
-        let mut tasks = FuturesUnordered::new();
-
-        for peer_info in peers.iter().take(CANDIDATES_PER_POOL + 4) {
+        // Request quotes with limited concurrency and retries
+        let quote_futures = peers.iter().take(CANDIDATES_PER_POOL + 4).map(|peer_info| {
             let network = self.network.clone();
             let network_addr = network_addr.clone();
             let peer_info = peer_info.clone();
             let peer_id = peer_info.peer_id;
 
-            tasks.push(async move {
-                let result = network
-                    .get_merkle_candidate_quote(
-                        network_addr,
-                        peer_info,
-                        data_type_index,
-                        data_size,
-                        merkle_payment_timestamp,
-                    )
-                    .await;
-                (peer_id, result)
-            });
-        }
+            async move {
+                let mut last_err = None;
+                for attempt in 0..=MAX_QUOTE_RETRIES {
+                    match network
+                        .get_merkle_candidate_quote(
+                            network_addr.clone(),
+                            peer_info.clone(),
+                            data_type_index,
+                            data_size,
+                            merkle_payment_timestamp,
+                        )
+                        .await
+                    {
+                        Ok(candidate) => return (peer_id, Ok(candidate)),
+                        Err(e) => {
+                            if attempt < MAX_QUOTE_RETRIES {
+                                debug!(
+                                    "Probe quote request to {peer_id:?} failed (attempt {}), retrying: {e}",
+                                    attempt + 1
+                                );
+                            }
+                            last_err = Some(e);
+                        }
+                    }
+                }
+                (peer_id, Err(last_err.expect("loop ran at least once")))
+            }
+        });
 
         let mut candidates: Vec<MerklePaymentCandidateNode> = Vec::new();
-        while let Some((peer_id, result)) = tasks.next().await {
+        let mut quote_stream =
+            stream::iter(quote_futures).buffer_unordered(MAX_CONCURRENT_REQUESTS);
+        while let Some((peer_id, result)) = quote_stream.next().await {
             match result {
                 Ok(candidate) => {
                     candidates.push(candidate);
