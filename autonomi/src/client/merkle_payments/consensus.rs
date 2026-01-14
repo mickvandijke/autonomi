@@ -41,8 +41,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
 use xor_name::XorName;
 
-/// A constant that defines the minimum number of common Merkle pool candidates required.
+/// The absolute minimum number of common Merkle pool candidates required.
 const MIN_COMMON_MERKLE_CANDIDATES: usize = 8;
+
+/// Thresholds to try for consensus, in order from most strict to least strict.
+/// We first try to find 16 common candidates (ideal), then fall back progressively.
+const CONSENSUS_THRESHOLDS: [usize; 4] = [16, 12, 10, 8];
 
 /// Minimum number of nodes that must accept a chunk during probing for it to be considered already uploaded.
 /// This ensures data redundancy - we want at least a quorum of nodes to have the chunk.
@@ -716,13 +720,13 @@ impl Client {
     }
 
     /// Find a valid selection of combinations across all groups.
+    ///
+    /// Tries progressively lower consensus thresholds: 16 → 12 → 10 → 8.
     /// Returns the global common candidates and the selected combination index per chunk.
     fn find_cross_group_consensus(
         chunk_addrs: &[XorName],
         valid_combinations: &HashMap<XorName, Vec<(Vec<usize>, HashSet<PeerId>)>>,
     ) -> Result<(HashSet<PeerId>, Vec<(XorName, usize)>), ConsensusError> {
-        const MIN_COMMON: usize = 8;
-
         if chunk_addrs.is_empty() {
             return Err(ConsensusError::InsufficientResponses {
                 got: 0,
@@ -731,66 +735,66 @@ impl Client {
             });
         }
 
-        // Handle single chunk case
+        // Handle single chunk case - find the best threshold we can achieve
         if chunk_addrs.len() == 1 {
             let addr = chunk_addrs[0];
             if let Some(combos) = valid_combinations.get(&addr) {
-                if let Some((_, common)) = combos.first() {
-                    return Ok((common.clone(), vec![(addr, 0)]));
+                // Find the combination with the most common candidates that meets at least MIN threshold
+                let mut best_combo: Option<(usize, &HashSet<PeerId>)> = None;
+                for (idx, (_, common)) in combos.iter().enumerate() {
+                    if common.len() >= MIN_COMMON_MERKLE_CANDIDATES {
+                        if best_combo.is_none() || common.len() > best_combo.unwrap().1.len() {
+                            best_combo = Some((idx, common));
+                        }
+                    }
+                }
+                if let Some((idx, common)) = best_combo {
+                    debug!(
+                        "Single chunk consensus found with {} common candidates",
+                        common.len()
+                    );
+                    return Ok((common.clone(), vec![(addr, idx)]));
                 }
             }
             return Err(ConsensusError::NoConsensus {
                 found: 0,
-                needed: MIN_COMMON,
+                needed: MIN_COMMON_MERKLE_CANDIDATES,
             });
         }
 
-        // Use backtracking to find valid cross-group selection
-        let mut selected: Vec<(XorName, usize)> = Vec::with_capacity(chunk_addrs.len());
-        let mut current_common: Option<HashSet<PeerId>> = None;
+        // Try each threshold in order from strictest to most lenient
+        for &threshold in &CONSENSUS_THRESHOLDS {
+            let mut selected: Vec<(XorName, usize)> = Vec::with_capacity(chunk_addrs.len());
+            let mut current_common: Option<HashSet<PeerId>> = None;
 
-        if Self::backtrack_find_consensus(
-            chunk_addrs,
-            valid_combinations,
-            0,
-            &mut selected,
-            &mut current_common,
-            MIN_COMMON,
-        ) {
-            Ok((current_common.unwrap_or_default(), selected))
-        } else {
-            // Fallback: use first valid combination from each group, accept smaller intersection
-            let mut fallback_common: Option<HashSet<PeerId>> = None;
-            let mut fallback_selected = Vec::new();
-
-            for addr in chunk_addrs {
-                if let Some(combos) = valid_combinations.get(addr) {
-                    if let Some((_, common)) = combos.first() {
-                        fallback_selected.push((*addr, 0));
-                        fallback_common = Some(match fallback_common {
-                            Some(existing) => existing.intersection(common).copied().collect(),
-                            None => common.clone(),
-                        });
-                    }
-                }
+            if Self::backtrack_find_consensus(
+                chunk_addrs,
+                valid_combinations,
+                0,
+                &mut selected,
+                &mut current_common,
+                threshold,
+            ) {
+                let common = current_common.unwrap_or_default();
+                info!(
+                    "Cross-group consensus achieved with {} common candidates (threshold: {})",
+                    common.len(),
+                    threshold
+                );
+                return Ok((common, selected));
             }
 
-            if let Some(common) = fallback_common {
-                if !common.is_empty() {
-                    warn!(
-                        "Using fallback consensus with {} common candidates (less than ideal {})",
-                        common.len(),
-                        MIN_COMMON
-                    );
-                    return Ok((common, fallback_selected));
-                }
-            }
-
-            Err(ConsensusError::NoConsensus {
-                found: 0,
-                needed: MIN_COMMON,
-            })
+            debug!(
+                "Could not find consensus with threshold {}, trying next",
+                threshold
+            );
         }
+
+        // No threshold worked - consensus is not possible
+        Err(ConsensusError::NoConsensus {
+            found: 0,
+            needed: MIN_COMMON_MERKLE_CANDIDATES,
+        })
     }
 
     /// Backtracking algorithm to find valid combination selection across groups
