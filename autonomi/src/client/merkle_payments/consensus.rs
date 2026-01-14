@@ -30,7 +30,7 @@ use ant_evm::merkle_payments::{
 };
 use ant_evm::{AttoTokens, EvmWallet};
 use ant_protocol::storage::{Chunk, ChunkAddress, DataTypes, RecordKind, try_serialize_record};
-use ant_protocol::NetworkAddress;
+use ant_protocol::{CLOSE_GROUP_SIZE, NetworkAddress};
 use evmlib::merkle_batch_payment::PoolCommitment;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
