@@ -127,7 +127,7 @@ impl Client {
     /// * `wallet` - The wallet to pay for probing
     ///
     /// # Returns
-    /// * (topology_views, accepted_chunks, probe_cost) - Topology views, chunks accepted by at least MIN_NODES_ACCEPT_CHUNK nodes during probing, and cost of probing
+    /// * (topology_views, accepted_chunks, acceptance_counts, probe_cost) - Topology views, chunks accepted by at least MIN_NODES_ACCEPT_CHUNK nodes, all acceptance counts, and cost of probing
     pub(crate) async fn probe_all_storing_nodes_for_topology(
         &self,
         chunks: &[Chunk],
@@ -135,7 +135,15 @@ impl Client {
         data_type: DataTypes,
         data_size: usize,
         wallet: &EvmWallet,
-    ) -> Result<(Vec<TopologyView>, HashSet<XorName>, AttoTokens), ConsensusError> {
+    ) -> Result<
+        (
+            Vec<TopologyView>,
+            HashSet<XorName>,
+            HashMap<XorName, usize>,
+            AttoTokens,
+        ),
+        ConsensusError,
+    > {
         let midpoint_address = midpoint_proof.address();
 
         info!(
@@ -335,18 +343,20 @@ impl Client {
             }
         }
 
-        // Only consider chunks that were accepted by at least MIN_NODES_ACCEPT_CHUNK nodes
+        // Identify chunks that were accepted by at least MIN_NODES_ACCEPT_CHUNK nodes
+        // These will be skipped entirely during upload
         let accepted_chunks: HashSet<XorName> = chunk_acceptance_counts
-            .into_iter()
+            .iter()
             .filter_map(|(chunk_addr, count)| {
-                if count >= MIN_NODES_ACCEPT_CHUNK {
+                if *count >= MIN_NODES_ACCEPT_CHUNK {
                     info!(
                         "Chunk {chunk_addr:?} was accepted by {count} nodes (>= {MIN_NODES_ACCEPT_CHUNK}) - will skip upload"
                     );
-                    Some(chunk_addr)
+                    Some(*chunk_addr)
                 } else {
                     debug!(
-                        "Chunk {chunk_addr:?} was accepted by only {count} nodes (< {MIN_NODES_ACCEPT_CHUNK}) - will still upload"
+                        "Chunk {chunk_addr:?} was accepted by only {count} nodes (< {MIN_NODES_ACCEPT_CHUNK}) - needs consensus for {} more",
+                        MIN_NODES_ACCEPT_CHUNK - count
                     );
                     None
                 }
@@ -370,7 +380,12 @@ impl Client {
             });
         }
 
-        Ok((topology_views, accepted_chunks, probe_cost))
+        Ok((
+            topology_views,
+            accepted_chunks,
+            chunk_acceptance_counts,
+            probe_cost,
+        ))
     }
 
     /// Build an initial (non-consensus) candidate pool for a midpoint.
@@ -392,7 +407,8 @@ impl Client {
             .network
             .get_closest_n_peers(
                 midpoint_network_addr.clone(),
-                NonZeroUsize::new(CANDIDATES_PER_POOL).expect("CANDIDATES_PER_POOL is non-zero"),
+                NonZeroUsize::new(CANDIDATES_PER_POOL + 4)
+                    .expect("CANDIDATES_PER_POOL is non-zero"),
             )
             .await?;
 
@@ -426,23 +442,26 @@ impl Client {
 
     /// Build consensus candidates from multiple topology views.
     ///
-    /// For every chunk, we select 3 topology views that have at least 8 merkle candidates
-    /// in common with all selected sets of 3 topology views from other chunks.
+    /// For every chunk, we select N topology views (where N = 3 - acceptance_count) that have
+    /// at least 8 merkle candidates in common with all selected views from other chunks.
+    /// This allows chunks with partial replication to need fewer consensus views.
     ///
     /// # Algorithm
     /// 1. Group views by chunk address
-    /// 2. For each group, generate all 3-view combinations with >= 8 common candidates
+    /// 2. For each group, generate all N-view combinations with >= 8 common candidates (N based on acceptance count)
     /// 3. Cross-check combinations between groups to find a valid global selection
     /// 4. If common candidates < 16, pad with most frequent peers from the combinations
     ///
     /// # Arguments
     /// * `views` - Topology views from multiple storing nodes
+    /// * `acceptance_counts` - Number of nodes that already accepted each chunk during probing
     ///
     /// # Returns
-    /// * Vector of CANDIDATES_PER_POOL PeerIds and hashmap of the selected 3 storing nodes per chunk address
+    /// * Vector of CANDIDATES_PER_POOL PeerIds and hashmap of the selected storing nodes per chunk address
     pub(crate) fn build_consensus_candidates(
         &self,
         views: &[TopologyView],
+        acceptance_counts: &HashMap<XorName, usize>,
     ) -> Result<(Vec<PeerId>, HashMap<XorName, Vec<PeerId>>), ConsensusError> {
         if views.is_empty() {
             return Err(ConsensusError::InsufficientResponses {
@@ -452,13 +471,23 @@ impl Client {
             });
         }
 
-        // Step 1: Group views by chunk address
+        // Step 1: Group views by chunk address and determine required views per chunk
         let mut views_by_chunk: HashMap<XorName, Vec<&TopologyView>> = HashMap::new();
+        let mut required_views_per_chunk: HashMap<XorName, usize> = HashMap::new();
+
         for view in views {
             views_by_chunk
                 .entry(view.chunk_address)
                 .or_default()
                 .push(view);
+
+            // Calculate required views: 3 - nodes that already accepted this chunk
+            let acceptance_count = acceptance_counts
+                .get(&view.chunk_address)
+                .copied()
+                .unwrap_or(0);
+            let required = MIN_NODES_ACCEPT_CHUNK.saturating_sub(acceptance_count);
+            required_views_per_chunk.insert(view.chunk_address, required);
         }
 
         debug!(
@@ -467,21 +496,27 @@ impl Client {
             views_by_chunk.len()
         );
 
-        // Step 2: For each group, generate valid 3-view combinations (>= 8 common candidates)
+        // Step 2: For each group, generate valid N-view combinations (>= 8 common candidates)
+        // where N = 3 - acceptance_count for that chunk
         // Store as: chunk_address -> Vec<(view_indices, common_candidates_set)>
         let mut valid_combinations: HashMap<XorName, Vec<(Vec<usize>, HashSet<PeerId>)>> =
             HashMap::new();
 
         for (chunk_addr, chunk_views) in &views_by_chunk {
-            let combinations = Self::generate_valid_combinations(chunk_views);
+            let required_views = *required_views_per_chunk
+                .get(chunk_addr)
+                .unwrap_or(&MIN_NODES_ACCEPT_CHUNK);
+            let acceptance_count = acceptance_counts.get(chunk_addr).copied().unwrap_or(0);
+
+            let combinations = Self::generate_valid_combinations(chunk_views, required_views);
             if combinations.is_empty() {
                 warn!(
-                    "No valid 3-view combinations for chunk {chunk_addr:?} with {} views",
+                    "No valid {required_views}-view combinations for chunk {chunk_addr:?} with {} views ({acceptance_count} already accepted)",
                     chunk_views.len()
                 );
             } else {
                 debug!(
-                    "Chunk {chunk_addr:?}: {} valid combinations from {} views",
+                    "Chunk {chunk_addr:?}: {} valid {required_views}-view combinations from {} views ({acceptance_count} already accepted)",
                     combinations.len(),
                     chunk_views.len()
                 );
@@ -549,16 +584,33 @@ impl Client {
         Ok((final_candidates, selected_storing_nodes))
     }
 
-    /// Generate all valid 3-view combinations for a chunk's views.
-    /// A combination is valid if the 3 views share at least 8 merkle candidates.
-    fn generate_valid_combinations(views: &[&TopologyView]) -> Vec<(Vec<usize>, HashSet<PeerId>)> {
-        const VIEWS_PER_COMBO: usize = 3;
-
+    /// Generate all valid N-view combinations for a chunk's views.
+    /// A combination is valid if the N views share at least 8 merkle candidates.
+    ///
+    /// # Arguments
+    /// * `views` - The topology views for this chunk
+    /// * `required_views` - Number of views required (typically 3 - acceptance_count)
+    fn generate_valid_combinations(
+        views: &[&TopologyView],
+        required_views: usize,
+    ) -> Vec<(Vec<usize>, HashSet<PeerId>)> {
         let mut valid = Vec::new();
         let n = views.len();
 
-        if n < VIEWS_PER_COMBO {
-            // Not enough views for a combination, use all available
+        // If we need 0 or 1 views, any single view is valid
+        if required_views <= 1 {
+            for i in 0..n {
+                let indices = vec![i];
+                let common = Self::intersect_views(views, &indices);
+                if !common.is_empty() {
+                    valid.push((indices, common));
+                }
+            }
+            return valid;
+        }
+
+        if n < required_views {
+            // Not enough views for a full combination, use all available
             if !views.is_empty() {
                 let indices: Vec<usize> = (0..n).collect();
                 let common = Self::intersect_views(views, &indices);
@@ -569,20 +621,46 @@ impl Client {
             return valid;
         }
 
-        // Generate all C(n, 3) combinations
-        for i in 0..n {
-            for j in (i + 1)..n {
-                for k in (j + 1)..n {
-                    let indices = vec![i, j, k];
-                    let common = Self::intersect_views(views, &indices);
-                    if common.len() >= MIN_COMMON_MERKLE_CANDIDATES {
-                        valid.push((indices, common));
-                    }
-                }
+        // Generate all C(n, required_views) combinations
+        let indices_vec: Vec<usize> = (0..n).collect();
+        Self::generate_combinations(&indices_vec, required_views, &mut |combo| {
+            let common = Self::intersect_views(views, combo);
+            if common.len() >= MIN_COMMON_MERKLE_CANDIDATES {
+                valid.push((combo.to_vec(), common));
             }
-        }
+        });
 
         valid
+    }
+
+    /// Helper to generate all combinations of size k from items
+    fn generate_combinations<F>(items: &[usize], k: usize, callback: &mut F)
+    where
+        F: FnMut(&[usize]),
+    {
+        let mut combo = vec![0; k];
+        Self::generate_combinations_recursive(items, k, 0, 0, &mut combo, callback);
+    }
+
+    fn generate_combinations_recursive<F>(
+        items: &[usize],
+        k: usize,
+        start: usize,
+        depth: usize,
+        combo: &mut [usize],
+        callback: &mut F,
+    ) where
+        F: FnMut(&[usize]),
+    {
+        if depth == k {
+            callback(combo);
+            return;
+        }
+
+        for i in start..items.len() {
+            combo[depth] = items[i];
+            Self::generate_combinations_recursive(items, k, i + 1, depth + 1, combo, callback);
+        }
     }
 
     /// Compute intersection of merkle candidates for selected view indices
@@ -1012,7 +1090,7 @@ impl Client {
 
         // Step 1: Probe storing nodes from ALL chunks that map to this midpoint
         // Collect topology views from all storing nodes (this pays for probing)
-        let (topology_views, accepted_chunks, probe_cost) = self
+        let (topology_views, accepted_chunks, acceptance_counts, probe_cost) = self
             .probe_all_storing_nodes_for_topology(
                 &chunks_for_midpoint,
                 &midpoint_proof,
@@ -1030,15 +1108,16 @@ impl Client {
             );
         }
 
-        // Step 2: Filter out topology views for chunks that were already accepted by enough nodes
-        // We don't need consensus for chunks that are already sufficiently replicated
+        // Step 2: Filter out topology views for chunks that were already accepted by enough nodes (>= 3)
+        // Chunks with 1-2 acceptances still need consensus to reach the quorum of 3
         let original_view_count = topology_views.len();
         let filtered_topology_views: Vec<TopologyView> = topology_views
             .into_iter()
             .filter(|view| {
                 if accepted_chunks.contains(&view.chunk_address) {
+                    let count = acceptance_counts.get(&view.chunk_address).copied().unwrap_or(0);
                     debug!(
-                        "Filtering out topology view for chunk {:?} - already accepted by enough nodes",
+                        "Filtering out topology view for chunk {:?} - already accepted by {count} nodes (>= {MIN_NODES_ACCEPT_CHUNK})",
                         view.chunk_address
                     );
                     false
@@ -1051,11 +1130,18 @@ impl Client {
         let filtered_count = filtered_topology_views.len();
         if filtered_count < original_view_count {
             info!(
-                "Filtered topology views: {} remaining after removing {} views for accepted chunks",
+                "Filtered topology views: {} remaining after removing {} views for fully-replicated chunks",
                 filtered_count,
                 original_view_count - filtered_count
             );
         }
+
+        // Build a filtered acceptance_counts that only includes chunks with < 3 acceptances
+        let partial_acceptance_counts: HashMap<XorName, usize> = acceptance_counts
+            .iter()
+            .filter(|&(_, &count)| count < MIN_NODES_ACCEPT_CHUNK)
+            .map(|(&k, &v)| (k, v))
+            .collect();
 
         // Step 3: Build consensus from filtered topology views (skip if we have no views)
         let (consensus_candidates, storing_nodes) = if filtered_topology_views.is_empty() {
@@ -1071,13 +1157,26 @@ impl Client {
             );
             (Vec::new(), HashMap::new())
         } else {
-            let result = self.build_consensus_candidates(&filtered_topology_views)?;
+            let result = self
+                .build_consensus_candidates(&filtered_topology_views, &partial_acceptance_counts)?;
             #[cfg(feature = "loud")]
-            println!(
-                "✓ Midpoint {midpoint_index}: Consensus found for {} chunks ({} already replicated)",
-                result.1.len(),
-                accepted_chunks.len()
-            );
+            {
+                let chunks_with_partial = partial_acceptance_counts.len();
+                if chunks_with_partial > 0 {
+                    println!(
+                        "✓ Midpoint {midpoint_index}: Consensus found for {} chunks ({} already replicated, {} partially replicated)",
+                        result.1.len(),
+                        accepted_chunks.len(),
+                        chunks_with_partial
+                    );
+                } else {
+                    println!(
+                        "✓ Midpoint {midpoint_index}: Consensus found for {} chunks ({} already replicated)",
+                        result.1.len(),
+                        accepted_chunks.len()
+                    );
+                }
+            }
             result
         };
 
@@ -1314,7 +1413,7 @@ mod tests {
         ];
 
         let view_refs: Vec<&TopologyView> = views.iter().collect();
-        let combinations = Client::generate_valid_combinations(&view_refs);
+        let combinations = Client::generate_valid_combinations(&view_refs, 3);
 
         // Should have exactly 1 combination (C(3,3) = 1)
         assert_eq!(combinations.len(), 1);
@@ -1358,7 +1457,7 @@ mod tests {
         ];
 
         let view_refs: Vec<&TopologyView> = views.iter().collect();
-        let combinations = Client::generate_valid_combinations(&view_refs);
+        let combinations = Client::generate_valid_combinations(&view_refs, 3);
 
         // Should have no valid combinations (only 5 common, need 8)
         assert!(combinations.is_empty());
@@ -1388,7 +1487,7 @@ mod tests {
         ];
 
         let view_refs: Vec<&TopologyView> = views.iter().collect();
-        let combinations = Client::generate_valid_combinations(&view_refs);
+        let combinations = Client::generate_valid_combinations(&view_refs, 3);
 
         let mut valid_combinations: HashMap<XorName, Vec<(Vec<usize>, HashSet<PeerId>)>> =
             HashMap::new();
@@ -1433,8 +1532,8 @@ mod tests {
 
         let mut valid_combinations: HashMap<XorName, Vec<(Vec<usize>, HashSet<PeerId>)>> =
             HashMap::new();
-        valid_combinations.insert(chunk1, Client::generate_valid_combinations(&view_refs1));
-        valid_combinations.insert(chunk2, Client::generate_valid_combinations(&view_refs2));
+        valid_combinations.insert(chunk1, Client::generate_valid_combinations(&view_refs1, 3));
+        valid_combinations.insert(chunk2, Client::generate_valid_combinations(&view_refs2, 3));
 
         let result = Client::find_cross_group_consensus(&[chunk1, chunk2], &valid_combinations);
         assert!(result.is_ok());
