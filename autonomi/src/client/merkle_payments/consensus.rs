@@ -601,7 +601,12 @@ impl Client {
                 .take(CANDIDATES_PER_POOL)
                 .collect()
         } else {
-            Self::pad_candidates_by_frequency(global_common, &selected_indices, &valid_combinations)
+            Self::pad_candidates_by_frequency(
+                global_common,
+                &selected_indices,
+                &valid_combinations,
+                &views_by_chunk,
+            )
         };
 
         if final_candidates.len() < CANDIDATES_PER_POOL {
@@ -867,20 +872,33 @@ impl Client {
         false
     }
 
-    /// Pad candidates with most frequent peers from selected combinations until we reach 16.
+    /// Pad candidates with most frequent peers from selected views until we reach 16.
+    ///
+    /// This function looks at ALL peers from the original topology views (not just the intersection),
+    /// counts how frequently each peer appears across the selected views, and adds the most frequent
+    /// peers to reach the required candidate count.
     fn pad_candidates_by_frequency(
         mut candidates: HashSet<PeerId>,
         selected_indices: &[(XorName, usize)],
         valid_combinations: &HashMap<XorName, Vec<(Vec<usize>, HashSet<PeerId>)>>,
+        views_by_chunk: &HashMap<XorName, Vec<&TopologyView>>,
     ) -> Vec<PeerId> {
-        // Count frequency of peers across selected combinations
+        // Count frequency of peers across ALL peers in the selected views (not just the common intersection)
         let mut frequency: HashMap<PeerId, usize> = HashMap::new();
 
         for (addr, combo_idx) in selected_indices {
             if let Some(combos) = valid_combinations.get(addr) {
-                if let Some((_, common)) = combos.get(*combo_idx) {
-                    for peer in common {
-                        *frequency.entry(*peer).or_insert(0) += 1;
+                if let Some((view_indices, _)) = combos.get(*combo_idx) {
+                    // Get the actual views for this chunk
+                    if let Some(chunk_views) = views_by_chunk.get(addr) {
+                        // Count peers from ALL merkle_candidates in the selected views
+                        for &view_idx in view_indices {
+                            if let Some(view) = chunk_views.get(view_idx) {
+                                for peer in &view.merkle_candidates {
+                                    *frequency.entry(*peer).or_insert(0) += 1;
+                                }
+                            }
+                        }
                     }
                 }
             }
