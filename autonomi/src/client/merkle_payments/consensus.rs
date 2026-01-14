@@ -1283,6 +1283,21 @@ impl Client {
         let mut total_probe_cost = AttoTokens::zero();
 
         for (midpoint_index, proof) in midpoint_proofs.into_iter().enumerate() {
+            // Skip midpoints that have no chunks mapping to them
+            // This can happen when the number of chunks doesn't fill the tree
+            // (e.g., 9 chunks in a depth-4 tree has 16 leaves but only 9 are filled)
+            let has_chunks = chunks
+                .iter()
+                .enumerate()
+                .any(|(i, _)| leaf_to_midpoint_index(i, depth) == midpoint_index);
+
+            if !has_chunks {
+                debug!(
+                    "Skipping midpoint {midpoint_index} - no chunks map to it (tree not fully populated)"
+                );
+                continue;
+            }
+
             let (pool, storing_nodes, accepted_chunks, probe_cost) = self
                 .build_consensus_candidate_pool(
                     proof,
