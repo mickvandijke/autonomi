@@ -1211,6 +1211,35 @@ impl Client {
             result
         };
 
+        // Verify all chunks that need uploads have consensus coverage.
+        // A chunk needs upload if it wasn't accepted by >= MIN_NODES_ACCEPT_CHUNK nodes.
+        // It has consensus coverage if it appears in storing_nodes.
+        // If a chunk needs upload but has no consensus, we cannot proceed.
+        let chunks_needing_upload: HashSet<XorName> = chunks_for_midpoint
+            .iter()
+            .map(|c| *c.name())
+            .filter(|addr| !accepted_chunks.contains(addr))
+            .collect();
+
+        let chunks_with_consensus: HashSet<XorName> = storing_nodes.keys().copied().collect();
+
+        let missing_chunks: Vec<XorName> = chunks_needing_upload
+            .difference(&chunks_with_consensus)
+            .copied()
+            .collect();
+
+        if !missing_chunks.is_empty() {
+            return Err(ConsensusError::InsufficientResponses {
+                got: 0,
+                needed: MIN_NODES_ACCEPT_CHUNK,
+                context: format!(
+                    "build_consensus_candidate_pool: {} chunks need upload but have no consensus (not enough topology views). First missing: {:?}",
+                    missing_chunks.len(),
+                    missing_chunks.first()
+                ),
+            });
+        }
+
         // Step 4: Get actual signed quotes from consensus candidates
         // We need consensus candidates even if some chunks were accepted during probing,
         // because the merkle tree payment requires valid candidate pools
