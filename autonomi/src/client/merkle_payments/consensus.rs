@@ -32,8 +32,7 @@ use ant_evm::{AttoTokens, EvmWallet};
 use ant_protocol::storage::{Chunk, ChunkAddress, DataTypes, RecordKind, try_serialize_record};
 use ant_protocol::{CLOSE_GROUP_SIZE, NetworkAddress};
 use evmlib::merkle_batch_payment::PoolCommitment;
-use futures::StreamExt;
-use futures::stream::FuturesUnordered;
+use futures::stream::{self, FuturesUnordered, StreamExt};
 use libp2p::PeerId;
 use libp2p::kad::{PeerInfo, Record};
 use std::collections::{HashMap, HashSet};
@@ -48,6 +47,10 @@ const MIN_COMMON_MERKLE_CANDIDATES: usize = 8;
 /// Minimum number of nodes that must accept a chunk during probing for it to be considered already uploaded.
 /// This ensures data redundancy - we want at least a quorum of nodes to have the chunk.
 const MIN_NODES_ACCEPT_CHUNK: usize = 3;
+
+/// Maximum number of concurrent probe requests during topology discovery.
+/// This limits network load during the probing phase.
+const MAX_CONCURRENT_PROBES: usize = 4;
 
 /// Errors that can occur during consensus-based merkle candidate selection
 #[derive(Debug, thiserror::Error)]
@@ -275,10 +278,10 @@ impl Client {
             chunk_proofs.insert(*address, payment_proof);
         }
 
-        // Step 7: Probe each storing node with paid proofs
+        // Step 7: Probe each storing node with paid proofs (limited to MAX_CONCURRENT_PROBES at a time)
         let mut topology_views = Vec::new();
         let mut chunk_acceptance_counts: HashMap<XorName, usize> = HashMap::new();
-        let mut tasks = FuturesUnordered::new();
+        let mut tasks = Vec::new();
         let record_kind = RecordKind::DataWithMerklePayment(data_type);
 
         for (peer_id, (peer_info, chunk, _leaf_index)) in storing_node_to_chunk {
@@ -312,8 +315,15 @@ impl Client {
             });
         }
 
-        // Collect topology views and track chunk acceptances
-        while let Some((peer_id, chunk_address, result)) = tasks.next().await {
+        info!(
+            "Probing {} storing nodes with max {} concurrent requests",
+            tasks.len(),
+            MAX_CONCURRENT_PROBES
+        );
+
+        // Collect topology views and track chunk acceptances (with limited concurrency)
+        let mut probe_stream = stream::iter(tasks).buffer_unordered(MAX_CONCURRENT_PROBES);
+        while let Some((peer_id, chunk_address, result)) = probe_stream.next().await {
             match result {
                 Ok((chunk_addr, node_peers, accepted)) => {
                     if accepted {
