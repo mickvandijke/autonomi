@@ -331,10 +331,12 @@ impl Client {
                 let network = self.network.clone();
                 let peer_info_clone = peer_info.clone();
                 tasks.push(async move {
+                    let start = std::time::Instant::now();
                     let result = network
                         .probe_for_topology(chunk_address, record, peer_info_clone)
                         .await;
-                    (peer_id, chunk_address, result)
+                    let elapsed = start.elapsed();
+                    (peer_id, chunk_address, result, elapsed)
                 });
             }
         }
@@ -347,7 +349,7 @@ impl Client {
 
         // Collect topology views and track chunk acceptances (serialized probing)
         let mut probe_stream = stream::iter(tasks).buffer_unordered(MAX_CONCURRENT_PROBES);
-        while let Some((peer_id, chunk_address, result)) = probe_stream.next().await {
+        while let Some((peer_id, chunk_address, result, elapsed)) = probe_stream.next().await {
             match result {
                 Ok((chunk_addr, node_peers, accepted)) => {
                     if accepted {
@@ -355,12 +357,12 @@ impl Client {
                         let count = chunk_acceptance_counts.entry(chunk_addr).or_insert(0);
                         *count += 1;
                         debug!(
-                            "Chunk {chunk_address:?} was accepted during probing by {peer_id:?} (count: {count})"
+                            "Chunk {chunk_address:?} was accepted during probing by {peer_id:?} in {elapsed:?} (count: {count})"
                         );
                     } else {
                         // Normal topology view response
                         debug!(
-                            "Got topology view from storing node {peer_id:?} with {} peers",
+                            "Got topology view from storing node {peer_id:?} with {} peers in {elapsed:?}",
                             node_peers.len()
                         );
                         topology_views.push(TopologyView {
@@ -371,7 +373,9 @@ impl Client {
                     }
                 }
                 Err(e) => {
-                    warn!("Failed to probe storing node {peer_id:?}: {e}");
+                    warn!(
+                        "Failed to probe storing node {peer_id:?} after {elapsed:?}: {e}"
+                    );
                     // Continue with other nodes
                 }
             }
