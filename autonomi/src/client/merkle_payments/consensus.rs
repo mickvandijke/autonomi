@@ -123,7 +123,81 @@ fn leaf_to_midpoint_index(leaf_index: usize, depth: u8) -> usize {
     leaf_index / leaves_per_midpoint
 }
 
+/// Maximum number of retries for probe requests.
+const MAX_PROBE_RETRIES: u8 = 1;
+
 impl Client {
+    /// Probe a specific peer to get its view of network topology for consensus.
+    ///
+    /// This sends a record to a specific peer, expecting it to reject with
+    /// TopologyVerificationFailed. The error contains the peer's view of
+    /// closest nodes to the target (midpoint) address, which is used for
+    /// consensus-based merkle candidate selection.
+    ///
+    /// # Arguments
+    /// * `chunk_address` - The address of the chunk being probed
+    /// * `record` - The record to send (with merkle proof)
+    /// * `peer` - The peer to probe
+    ///
+    /// # Returns
+    /// * `Ok((XorName, Vec<PeerId>, bool))` - Chunk address, topology view, and whether chunk was accepted
+    ///   - If accepted=true, the chunk was already stored and the topology view will be empty
+    ///   - If accepted=false, topology verification failed and the view contains the node's closest peers
+    /// * `Err(NetworkError)` - If the probe fails for a reason other than topology mismatch
+    async fn probe_for_topology(
+        &self,
+        chunk_address: XorName,
+        record: Record,
+        peer: PeerInfo,
+    ) -> Result<(XorName, Vec<PeerId>, bool), NetworkError> {
+        let mut last_error = None;
+
+        for attempt in 0..=MAX_PROBE_RETRIES {
+            let req_start = std::time::Instant::now();
+            let result = self.network.put_record_req(record.clone(), peer.clone()).await;
+            let req_elapsed = req_start.elapsed();
+            debug!(
+                "put_record_req to {:?} took {req_elapsed:?} (attempt {})",
+                peer.peer_id,
+                attempt + 1
+            );
+
+            match result {
+                // If the record was accepted, the chunk is already stored (or topology matched)
+                Ok(()) => {
+                    debug!(
+                        "Probe to {:?} succeeded - chunk was accepted (already stored or topology matched)",
+                        peer.peer_id
+                    );
+                    // Return empty topology with accepted=true to indicate early success
+                    return Ok((chunk_address, Vec::new(), true));
+                }
+                // This is what we expect - extract the node's topology view
+                Err(NetworkError::TopologyVerificationFailed { node_peers, .. }) => {
+                    debug!(
+                        "Got topology view from {:?}: {} peers",
+                        peer.peer_id,
+                        node_peers.len()
+                    );
+                    return Ok((chunk_address, node_peers, false));
+                }
+                // Any other error - retry up to MAX_PROBE_RETRIES times
+                Err(e) => {
+                    debug!(
+                        "Probe to {:?} failed with error (attempt {}/{}): {}",
+                        peer.peer_id,
+                        attempt + 1,
+                        MAX_PROBE_RETRIES + 1,
+                        e
+                    );
+                    last_error = Some(e);
+                }
+            }
+        }
+
+        Err(last_error.expect("loop must have run at least once"))
+    }
+
     /// Probe storing nodes from ALL chunks that map to a midpoint.
     ///
     /// This collects topology views from ALL storing nodes across ALL chunks
@@ -328,15 +402,13 @@ impl Client {
                     expires: None,
                 };
 
-                let network = self.network.clone();
+                let client = self.clone();
                 let peer_info_clone = peer_info.clone();
                 tasks.push(async move {
-                    let start = std::time::Instant::now();
-                    let result = network
+                    let result = client
                         .probe_for_topology(chunk_address, record, peer_info_clone)
                         .await;
-                    let elapsed = start.elapsed();
-                    (peer_id, chunk_address, result, elapsed)
+                    (peer_id, chunk_address, result)
                 });
             }
         }
@@ -349,7 +421,7 @@ impl Client {
 
         // Collect topology views and track chunk acceptances (serialized probing)
         let mut probe_stream = stream::iter(tasks).buffer_unordered(MAX_CONCURRENT_PROBES);
-        while let Some((peer_id, chunk_address, result, elapsed)) = probe_stream.next().await {
+        while let Some((peer_id, chunk_address, result)) = probe_stream.next().await {
             match result {
                 Ok((chunk_addr, node_peers, accepted)) => {
                     if accepted {
@@ -357,12 +429,12 @@ impl Client {
                         let count = chunk_acceptance_counts.entry(chunk_addr).or_insert(0);
                         *count += 1;
                         debug!(
-                            "Chunk {chunk_address:?} was accepted during probing by {peer_id:?} in {elapsed:?} (count: {count})"
+                            "Chunk {chunk_address:?} was accepted during probing by {peer_id:?} (count: {count})"
                         );
                     } else {
                         // Normal topology view response
                         debug!(
-                            "Got topology view from storing node {peer_id:?} with {} peers in {elapsed:?}",
+                            "Got topology view from storing node {peer_id:?} with {} peers",
                             node_peers.len()
                         );
                         topology_views.push(TopologyView {
@@ -373,9 +445,7 @@ impl Client {
                     }
                 }
                 Err(e) => {
-                    warn!(
-                        "Failed to probe storing node {peer_id:?} after {elapsed:?}: {e}"
-                    );
+                    warn!("Failed to probe storing node {peer_id:?}: {e}");
                     // Continue with other nodes
                 }
             }

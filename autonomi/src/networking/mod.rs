@@ -47,7 +47,6 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{sleep, timeout};
-use xor_name::XorName;
 
 /// Result type for tasks responses sent by the [`crate::driver::NetworkDriver`] to the [`crate::Network`]
 pub(in crate::networking) type OneShotTaskResult<T> = oneshot::Sender<Result<T, NetworkError>>;
@@ -414,7 +413,7 @@ impl Network {
         Err(NetworkError::PutRecordTooManyPeerFailed(ok_peers, err_res))
     }
 
-    async fn put_record_req(&self, record: Record, to: PeerInfo) -> Result<(), NetworkError> {
+    pub async fn put_record_req(&self, record: Record, to: PeerInfo) -> Result<(), NetworkError> {
         let (tx, rx) = oneshot::channel();
         let task = NetworkTask::PutRecordReq {
             record,
@@ -1035,70 +1034,6 @@ impl Network {
             .map_err(|_| NetworkError::NetworkDriverOffline)?;
         tracing::trace!("Waiting for connections made response");
         rx.await?
-    }
-
-    /// Probe a specific peer to get its view of network topology for consensus.
-    ///
-    /// This sends a record to a specific peer, expecting it to reject with
-    /// TopologyVerificationFailed. The error contains the peer's view of
-    /// closest nodes to the target (midpoint) address, which is used for
-    /// consensus-based merkle candidate selection.
-    ///
-    /// # Arguments
-    /// * `record` - The record to send (with merkle proof)
-    /// * `peer` - The peer to probe
-    ///
-    /// # Returns
-    /// * `Ok((XorName, Vec<PeerId>, bool))` - Chunk address, topology view, and whether chunk was accepted
-    ///   - If accepted=true, the chunk was already stored and the topology view will be empty
-    ///   - If accepted=false, topology verification failed and the view contains the node's closest peers
-    /// * `Err(NetworkError)` - If the probe fails for a reason other than topology mismatch
-    pub async fn probe_for_topology(
-        &self,
-        chunk_address: XorName,
-        record: Record,
-        peer: PeerInfo,
-    ) -> Result<(XorName, Vec<PeerId>, bool), NetworkError> {
-        const MAX_RETRIES: u8 = 1;
-        let mut last_error = None;
-
-        for attempt in 0..=MAX_RETRIES {
-            let result = self.put_record_req(record.clone(), peer.clone()).await;
-
-            match result {
-                // If the record was accepted, the chunk is already stored (or topology matched)
-                Ok(()) => {
-                    debug!(
-                        "Probe to {:?} succeeded - chunk was accepted (already stored or topology matched)",
-                        peer.peer_id
-                    );
-                    // Return empty topology with accepted=true to indicate early success
-                    return Ok((chunk_address, Vec::new(), true));
-                }
-                // This is what we expect - extract the node's topology view
-                Err(NetworkError::TopologyVerificationFailed { node_peers, .. }) => {
-                    debug!(
-                        "Got topology view from {:?}: {} peers",
-                        peer.peer_id,
-                        node_peers.len()
-                    );
-                    return Ok((chunk_address, node_peers, false));
-                }
-                // Any other error - retry up to MAX_RETRIES times
-                Err(e) => {
-                    debug!(
-                        "Probe to {:?} failed with error (attempt {}/{}): {}",
-                        peer.peer_id,
-                        attempt + 1,
-                        MAX_RETRIES + 1,
-                        e
-                    );
-                    last_error = Some(e);
-                }
-            }
-        }
-
-        Err(last_error.expect("loop must have run at least once"))
     }
 
     /// Get PeerInfo for a specific PeerId by querying closest peers.
