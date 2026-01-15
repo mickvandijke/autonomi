@@ -58,7 +58,7 @@ const MAX_CONCURRENT_REQUESTS: usize = 8;
 
 /// Maximum number of concurrent probing requests.
 /// Probing is serialized to avoid overwhelming the network.
-const MAX_CONCURRENT_PROBES: usize = 2;
+const MAX_CONCURRENT_PROBES: usize = 4;
 
 /// Maximum number of retries for network requests (peer info lookups and quote requests).
 const MAX_REQUEST_RETRIES: usize = 2;
@@ -543,9 +543,7 @@ impl Client {
                     });
                 }
                 // required_views == 0: chunk is already fully accepted, no combinations needed
-                debug!(
-                    "Chunk {chunk_addr:?}: no combinations needed (already fully accepted)"
-                );
+                debug!("Chunk {chunk_addr:?}: no combinations needed (already fully accepted)");
             } else {
                 debug!(
                     "Chunk {chunk_addr:?}: {} valid {required_views}-view combinations from {} views",

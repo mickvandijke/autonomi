@@ -1059,7 +1059,7 @@ impl Network {
         record: Record,
         peer: PeerInfo,
     ) -> Result<(XorName, Vec<PeerId>, bool), NetworkError> {
-        const MAX_RETRIES: u8 = 2;
+        const MAX_RETRIES: u8 = 1;
         let mut last_error = None;
 
         for attempt in 0..=MAX_RETRIES {
