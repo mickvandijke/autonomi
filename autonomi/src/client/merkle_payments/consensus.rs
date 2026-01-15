@@ -50,7 +50,7 @@ const CONSENSUS_THRESHOLDS: [usize; 4] = [16, 12, 10, 8];
 
 /// Minimum number of nodes that must accept a chunk during probing for it to be considered already uploaded.
 /// This ensures data redundancy - we want at least a quorum of nodes to have the chunk.
-const MIN_NODES_ACCEPT_CHUNK: usize = 3;
+const MIN_NODES_ACCEPT_CHUNK: usize = 2;
 
 /// Maximum number of concurrent network requests during consensus operations.
 /// This limits network load during peer lookups and quote requests.
