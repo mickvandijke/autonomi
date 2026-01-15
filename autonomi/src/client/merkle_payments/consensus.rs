@@ -529,9 +529,22 @@ impl Client {
 
             let combinations = Self::generate_valid_combinations(chunk_views, required_views);
             if combinations.is_empty() {
-                warn!(
-                    "No valid {required_views}-view combinations for chunk {chunk_addr:?}. have {} views",
-                    chunk_views.len()
+                if required_views > 0 {
+                    // Cannot proceed: chunk needs storing nodes but we have no valid combinations
+                    return Err(ConsensusError::InsufficientResponses {
+                        got: chunk_views.len(),
+                        needed: required_views,
+                        context: format!(
+                            "No valid {required_views}-view combinations for chunk {chunk_addr:?} (have {} views). \
+                             This chunk needs {required_views} more storing node(s) to accept it, but no combination \
+                             of the available views meets the minimum overlap threshold.",
+                            chunk_views.len()
+                        ),
+                    });
+                }
+                // required_views == 0: chunk is already fully accepted, no combinations needed
+                debug!(
+                    "Chunk {chunk_addr:?}: no combinations needed (already fully accepted)"
                 );
             } else {
                 debug!(
