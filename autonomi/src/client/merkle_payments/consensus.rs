@@ -229,6 +229,7 @@ impl Client {
             HashSet<XorName>,
             HashMap<XorName, usize>,
             AttoTokens,
+            MerklePaymentCandidatePool, // Pool for main midpoint (used if all chunks already replicated)
         ),
         ConsensusError,
     > {
@@ -320,6 +321,12 @@ impl Client {
                 .await?;
             probe_candidate_pools.push(pool);
         }
+
+        // Step 4b: Also build a pool for the MAIN tree's midpoint (used if all chunks already replicated)
+        // This ensures we always have a valid pool for the main payment, even when consensus is skipped
+        let main_midpoint_pool = self
+            .build_initial_candidate_pool(midpoint_proof.clone(), data_type, data_size)
+            .await?;
 
         // Step 5: Pay for the probe tree
         let pool_commitments: Vec<PoolCommitment> = probe_candidate_pools
@@ -493,6 +500,7 @@ impl Client {
             accepted_chunks,
             chunk_acceptance_counts,
             probe_cost,
+            main_midpoint_pool,
         ))
     }
 
@@ -1275,8 +1283,9 @@ impl Client {
 
         // Step 1: Probe storing nodes from ALL chunks that map to this midpoint
         // Collect topology views from all storing nodes (this pays for probing)
-        let (topology_views, accepted_chunks, acceptance_counts, probe_cost) = self
-            .probe_all_storing_nodes_for_topology(
+        // Also builds a pool for the main midpoint (used if all chunks already replicated)
+        let (topology_views, accepted_chunks, acceptance_counts, probe_cost, main_midpoint_pool) =
+            self.probe_all_storing_nodes_for_topology(
                 &chunks_for_midpoint,
                 &midpoint_proof,
                 data_type,
@@ -1294,22 +1303,27 @@ impl Client {
         }
 
         // Check if ALL chunks for this midpoint were accepted during probing
-        // If so, we can skip this midpoint entirely - no need to build a candidate pool
+        // If so, we can skip consensus building but still need a pool for the contract
         let chunks_for_midpoint_set: HashSet<XorName> =
             chunks_for_midpoint.iter().map(|c| *c.name()).collect();
         if chunks_for_midpoint_set.is_subset(&accepted_chunks) {
             info!(
-                "Midpoint {midpoint_index}: ALL {} chunks were already accepted during probing - skipping this midpoint",
+                "Midpoint {midpoint_index}: ALL {} chunks were already accepted during probing - using pre-built pool",
                 chunks_for_midpoint.len()
             );
             #[cfg(feature = "loud")]
             println!(
-                "✓ Midpoint {midpoint_index}: All {} chunks already replicated during probing - skipping",
+                "✓ Midpoint {midpoint_index}: All {} chunks already replicated during probing - using pre-built pool",
                 chunks_for_midpoint.len()
             );
-            // Return None for pool to indicate this midpoint should be skipped
-            // But still return the accepted_chunks and probe_cost
-            return Ok((None, HashMap::new(), accepted_chunks, probe_cost));
+            // Return the pre-built main midpoint pool (built during probing)
+            // This ensures we always have the correct number of pools for the smart contract
+            return Ok((
+                Some(main_midpoint_pool),
+                HashMap::new(),
+                accepted_chunks,
+                probe_cost,
+            ));
         }
 
         // Step 2: Filter out topology views for chunks that were already accepted by enough nodes (>= 3)
@@ -1482,8 +1496,8 @@ impl Client {
         let mut total_probe_cost = AttoTokens::zero();
 
         for (midpoint_index, proof) in midpoint_proofs.into_iter().enumerate() {
-            // Skip midpoints that have no chunks mapping to them
-            // This can happen when the number of chunks doesn't fill the tree
+            // Check if any chunks map to this midpoint
+            // This can be false when the number of chunks doesn't fill the tree
             // (e.g., 9 chunks in a depth-4 tree has 16 leaves but only 9 are filled)
             let has_chunks = chunks
                 .iter()
@@ -1491,9 +1505,15 @@ impl Client {
                 .any(|(i, _)| leaf_to_midpoint_index(i, depth) == midpoint_index);
 
             if !has_chunks {
+                // No chunks for this midpoint, but we still need a pool for the contract
+                // Build an initial pool without consensus (no probing needed)
                 debug!(
-                    "Skipping midpoint {midpoint_index} - no chunks map to it (tree not fully populated)"
+                    "Midpoint {midpoint_index} has no chunks - building initial pool (no probing)"
                 );
+                let pool = self
+                    .build_initial_candidate_pool(proof, data_type, data_size)
+                    .await?;
+                pools.push(pool);
                 continue;
             }
 
@@ -1508,7 +1528,7 @@ impl Client {
                     wallet,
                 )
                 .await?;
-            // Only add pool if it exists (None means all chunks were accepted during probing)
+            // Pool should always exist now (pre-built during probing if all chunks replicated)
             if let Some(pool) = maybe_pool {
                 pools.push(pool);
             }
