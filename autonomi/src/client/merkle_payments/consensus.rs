@@ -165,9 +165,10 @@ impl Client {
             chunks.len()
         );
 
-        // Step 1: Collect storing nodes from ALL chunks, tracking which chunk they're responsible for
-        // HashMap from PeerId -> (PeerInfo, chunk they're responsible for, leaf_index)
-        let mut storing_node_to_chunk: HashMap<PeerId, (PeerInfo, Chunk, usize)> = HashMap::new();
+        // Step 1: Collect storing nodes from ALL chunks, tracking ALL chunks each node is responsible for
+        // HashMap from PeerId -> (PeerInfo, Vec<(Chunk, leaf_index)>)
+        let mut storing_node_to_chunks: HashMap<PeerId, (PeerInfo, Vec<(Chunk, usize)>)> =
+            HashMap::new();
 
         for (leaf_index, chunk) in chunks.iter().enumerate() {
             let chunk_network_addr = NetworkAddress::ChunkAddress(*chunk.address());
@@ -180,16 +181,15 @@ impl Client {
                 .await?;
 
             for peer_info in storing_nodes {
-                // Only insert if not already present (keep the first chunk they were found for)
-                storing_node_to_chunk.entry(peer_info.peer_id).or_insert((
-                    peer_info,
-                    chunk.clone(),
-                    leaf_index,
-                ));
+                storing_node_to_chunks
+                    .entry(peer_info.peer_id)
+                    .or_insert_with(|| (peer_info, Vec::new()))
+                    .1
+                    .push((chunk.clone(), leaf_index));
             }
         }
 
-        if storing_node_to_chunk.is_empty() {
+        if storing_node_to_chunks.is_empty() {
             return Err(ConsensusError::InsufficientResponses {
                 got: 0,
                 needed: 1,
@@ -201,10 +201,17 @@ impl Client {
             });
         }
 
+        // Count total probe tasks (one per chunk per storing node)
+        let total_probes: usize = storing_node_to_chunks
+            .values()
+            .map(|(_, chunks)| chunks.len())
+            .sum();
+
         info!(
-            "Found {} unique storing nodes across {} chunks for midpoint {midpoint_address:?}",
-            storing_node_to_chunk.len(),
-            chunks.len()
+            "Found {} unique storing nodes across {} chunks for midpoint {midpoint_address:?} ({} total probes)",
+            storing_node_to_chunks.len(),
+            chunks.len(),
+            total_probes
         );
 
         // Step 2: Build a probe merkle tree from the chunks
@@ -289,45 +296,51 @@ impl Client {
             chunk_proofs.insert(*address, payment_proof);
         }
 
-        // Step 7: Probe each storing node with paid proofs (limited to MAX_CONCURRENT_REQUESTS at a time)
+        // Step 7: Probe each storing node with ALL chunks they're responsible for
+        // This ensures we get topology views for all chunks, not just the first one
         let mut topology_views = Vec::new();
         let mut chunk_acceptance_counts: HashMap<XorName, usize> = HashMap::new();
         let mut tasks = Vec::new();
         let record_kind = RecordKind::DataWithMerklePayment(data_type);
 
-        for (peer_id, (peer_info, chunk, _leaf_index)) in storing_node_to_chunk {
-            let chunk_address = *chunk.name();
-            let chunk_network_addr = NetworkAddress::ChunkAddress(*chunk.address());
+        for (peer_id, (peer_info, chunks_for_peer)) in storing_node_to_chunks {
+            for (chunk, _leaf_index) in chunks_for_peer {
+                let chunk_address = *chunk.name();
+                let chunk_network_addr = NetworkAddress::ChunkAddress(*chunk.address());
 
-            // Use the paid proof for this chunk
-            let probe_proof = chunk_proofs.get(&chunk_address).cloned().ok_or_else(|| {
-                ConsensusError::Serialization(format!(
-                    "Missing probe proof for chunk {chunk_address:?}"
-                ))
-            })?;
+                // Use the paid proof for this chunk
+                let probe_proof = chunk_proofs.get(&chunk_address).cloned().ok_or_else(|| {
+                    ConsensusError::Serialization(format!(
+                        "Missing probe proof for chunk {chunk_address:?}"
+                    ))
+                })?;
 
-            let record = Record {
-                key: chunk_network_addr.to_record_key(),
-                value: try_serialize_record(&(probe_proof, chunk), record_kind)
-                    .map_err(|e| {
-                        ConsensusError::Serialization(format!("Failed to serialize probe: {e:?}"))
-                    })?
-                    .to_vec(),
-                publisher: None,
-                expires: None,
-            };
+                let record = Record {
+                    key: chunk_network_addr.to_record_key(),
+                    value: try_serialize_record(&(probe_proof, chunk), record_kind)
+                        .map_err(|e| {
+                            ConsensusError::Serialization(format!(
+                                "Failed to serialize probe: {e:?}"
+                            ))
+                        })?
+                        .to_vec(),
+                    publisher: None,
+                    expires: None,
+                };
 
-            let network = self.network.clone();
-            tasks.push(async move {
-                let result = network
-                    .probe_for_topology(chunk_address, record, peer_info)
-                    .await;
-                (peer_id, chunk_address, result)
-            });
+                let network = self.network.clone();
+                let peer_info_clone = peer_info.clone();
+                tasks.push(async move {
+                    let result = network
+                        .probe_for_topology(chunk_address, record, peer_info_clone)
+                        .await;
+                    (peer_id, chunk_address, result)
+                });
+            }
         }
 
         info!(
-            "Probing {} storing nodes with max {} concurrent requests",
+            "Probing with {} chunk/node combinations with max {} concurrent requests",
             tasks.len(),
             MAX_CONCURRENT_PROBES
         );
@@ -1135,7 +1148,8 @@ impl Client {
     /// * `wallet` - The wallet for paying for probes
     ///
     /// # Returns
-    /// * (MerklePaymentCandidatePool, storing_nodes, accepted_chunks, probe_cost) - Pool with consensus candidates, storing nodes per chunk, chunks accepted during probing, and probe cost
+    /// * `(Some(pool), storing_nodes, accepted_chunks, probe_cost)` - Pool with consensus candidates, storing nodes per chunk, chunks accepted during probing, and probe cost
+    /// * `(None, empty, accepted_chunks, probe_cost)` - All chunks for this midpoint were already accepted during probing, no pool needed
     pub(crate) async fn build_consensus_candidate_pool(
         &self,
         midpoint_proof: MidpointProof,
@@ -1147,7 +1161,7 @@ impl Client {
         wallet: &EvmWallet,
     ) -> Result<
         (
-            MerklePaymentCandidatePool,
+            Option<MerklePaymentCandidatePool>,
             HashMap<XorName, Vec<PeerId>>,
             HashSet<XorName>,
             AttoTokens,
@@ -1205,6 +1219,25 @@ impl Client {
             );
         }
 
+        // Check if ALL chunks for this midpoint were accepted during probing
+        // If so, we can skip this midpoint entirely - no need to build a candidate pool
+        let chunks_for_midpoint_set: HashSet<XorName> =
+            chunks_for_midpoint.iter().map(|c| *c.name()).collect();
+        if chunks_for_midpoint_set.is_subset(&accepted_chunks) {
+            info!(
+                "Midpoint {midpoint_index}: ALL {} chunks were already accepted during probing - skipping this midpoint",
+                chunks_for_midpoint.len()
+            );
+            #[cfg(feature = "loud")]
+            println!(
+                "✓ Midpoint {midpoint_index}: All {} chunks already replicated during probing - skipping",
+                chunks_for_midpoint.len()
+            );
+            // Return None for pool to indicate this midpoint should be skipped
+            // But still return the accepted_chunks and probe_cost
+            return Ok((None, HashMap::new(), accepted_chunks, probe_cost));
+        }
+
         // Step 2: Filter out topology views for chunks that were already accepted by enough nodes (>= 3)
         // Chunks with 1-2 acceptances still need consensus to reach the quorum of 3
         let original_view_count = topology_views.len();
@@ -1242,14 +1275,11 @@ impl Client {
 
         // Step 3: Build consensus from filtered topology views (skip if we have no views)
         let (consensus_candidates, storing_nodes) = if filtered_topology_views.is_empty() {
-            // All chunks were accepted, no topology views to build consensus from
-            // Return empty consensus data - we won't need to upload anything
+            // No topology views remaining - either all chunks were accepted during probing,
+            // or we couldn't get topology views for chunks that still need upload.
+            // The validation check below will catch if chunks need upload but have no consensus.
             info!(
-                "No topology views remaining after filtering - all chunks were accepted during probing"
-            );
-            #[cfg(feature = "loud")]
-            println!(
-                "✓ Midpoint {midpoint_index}: All {} chunks already replicated during probing",
+                "No topology views remaining after filtering ({} chunks accepted during probing)",
                 accepted_chunks.len()
             );
             (Vec::new(), HashMap::new())
@@ -1307,42 +1337,15 @@ impl Client {
         }
 
         // Step 4: Get actual signed quotes from consensus candidates
-        // We need consensus candidates even if some chunks were accepted during probing,
-        // because the merkle tree payment requires valid candidate pools
-        let candidate_nodes = if filtered_topology_views.is_empty() {
-            // All chunks were accepted during probing - we still need to build a minimal candidate pool
-            // Use a simple non-consensus approach to get candidates for the midpoint
-            warn!(
-                "All chunks accepted during probing, falling back to non-consensus candidate selection"
-            );
-            let midpoint_network_addr =
-                NetworkAddress::ChunkAddress(ChunkAddress::new(midpoint_address));
-            let closest = self
-                .network
-                .get_closest_n_peers(
-                    midpoint_network_addr.clone(),
-                    std::num::NonZeroUsize::new(CANDIDATES_PER_POOL)
-                        .expect("CANDIDATES_PER_POOL is non-zero"),
-                )
-                .await?;
-            self.create_probe_candidates(
-                &closest,
-                midpoint_address,
-                data_type,
-                data_size,
-                merkle_payment_timestamp,
-            )
-            .await?
-        } else {
-            self.get_quotes_from_consensus_candidates(
+        let candidate_nodes = self
+            .get_quotes_from_consensus_candidates(
                 &consensus_candidates,
                 midpoint_address,
                 data_type,
                 data_size,
                 merkle_payment_timestamp,
             )
-            .await?
-        };
+            .await?;
 
         // Step 5: Build the pool
         let pool = MerklePaymentCandidatePool {
@@ -1356,7 +1359,7 @@ impl Client {
             accepted_chunks.len()
         );
 
-        Ok((pool, storing_nodes, accepted_chunks, probe_cost))
+        Ok((Some(pool), storing_nodes, accepted_chunks, probe_cost))
     }
 
     /// Build consensus-based candidate pools for all midpoints (sequentially to avoid wallet contention).
@@ -1420,7 +1423,7 @@ impl Client {
                 continue;
             }
 
-            let (pool, storing_nodes, accepted_chunks, probe_cost) = self
+            let (maybe_pool, storing_nodes, accepted_chunks, probe_cost) = self
                 .build_consensus_candidate_pool(
                     proof,
                     midpoint_index,
@@ -1431,7 +1434,10 @@ impl Client {
                     wallet,
                 )
                 .await?;
-            pools.push(pool);
+            // Only add pool if it exists (None means all chunks were accepted during probing)
+            if let Some(pool) = maybe_pool {
+                pools.push(pool);
+            }
             all_storing_nodes.extend(storing_nodes);
             all_accepted_chunks.extend(accepted_chunks);
             total_probe_cost = AttoTokens::from_atto(

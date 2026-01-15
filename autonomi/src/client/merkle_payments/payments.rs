@@ -466,6 +466,29 @@ impl Client {
             info!("{} chunks were accepted during probing and will be skipped during upload", accepted_chunks.len());
         }
 
+        // Check if ALL chunks were accepted during probing
+        // If so, we can skip the main payment entirely - chunks are already uploaded
+        let all_chunks_accepted = addresses.iter().all(|addr| accepted_chunks.contains(addr));
+        if all_chunks_accepted {
+            info!(
+                "All {} chunks were accepted during probing - skipping main payment",
+                addresses.len()
+            );
+            #[cfg(feature = "loud")]
+            println!(
+                "✓ All {} chunks already stored during probing - skipping main merkle payment",
+                addresses.len()
+            );
+            // Return receipt with only probe cost (no proofs needed since nothing to upload)
+            let receipt = MerklePaymentReceipt {
+                proofs: HashMap::new(),
+                file_chunk_counts: HashMap::new(),
+                amount_paid: probe_cost,
+                storing_nodes,
+            };
+            return Ok((receipt, accepted_chunks));
+        }
+
         // Submit main payment to smart contract
         debug!("Waiting for wallet lock");
         let lock_guard = wallet.lock().await;
