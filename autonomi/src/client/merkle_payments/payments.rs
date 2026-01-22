@@ -60,6 +60,36 @@ impl MerklePaymentReceipt {
     }
 }
 
+/// Data prepared for a merkle payment that will be signed externally
+///
+/// This struct is fully serializable for sending to/from a frontend wallet.
+/// It contains everything needed to:
+/// 1. Submit the payment transaction via external wallet
+/// 2. Complete the payment and generate proofs after transaction confirms
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct PreparedMerklePayment {
+    /// Original addresses in order (for proof generation)
+    pub addresses: Vec<XorName>,
+
+    /// Salts used for each address (to reconstruct tree)
+    pub salts: Vec<[u8; 32]>,
+
+    /// Tree depth
+    pub depth: u8,
+
+    /// Merkle root (for verification)
+    pub root: XorName,
+
+    /// Candidate pools collected from the network
+    pub candidate_pools: Vec<MerklePaymentCandidatePool>,
+
+    /// Pool commitments to send to smart contract
+    pub pool_commitments: Vec<PoolCommitment>,
+
+    /// Timestamp used for the payment
+    pub merkle_payment_timestamp: u64,
+}
+
 /// Errors that can occur during Merkle batch payment operations
 #[derive(Debug, thiserror::Error)]
 pub enum MerklePaymentError {
@@ -85,6 +115,8 @@ pub enum MerklePaymentError {
     TimestampError(#[from] std::time::SystemTimeError),
     #[error("Candidate pool verification failed: {0}")]
     PoolVerification(#[from] MerklePaymentVerificationError),
+    #[error("Winner pool not found in candidate pools: {hash}")]
+    WinnerPoolNotFound { hash: String },
 }
 
 impl Client {
@@ -441,5 +473,96 @@ impl Client {
             receipt.proofs.len()
         );
         Ok(receipt)
+    }
+
+    /// Prepare a merkle payment for external signing
+    ///
+    /// This method:
+    /// 1. Builds the Merkle tree from addresses
+    /// 2. Queries the network for candidate pools
+    /// 3. Returns all data needed for external wallet to sign
+    ///
+    /// After receiving the result, serialize the `pool_commitments`, `depth`,
+    /// and `merkle_payment_timestamp` for your frontend wallet to call the
+    /// smart contract's `payForMerkleTree` function.
+    ///
+    /// # Arguments
+    /// * `data_type` - The data type being uploaded (must be same for all data in batch)
+    /// * `content_addrs` - Iterator of XorName addresses
+    /// * `data_size` - The per-record data size (typically MAX_CHUNK_SIZE for chunks)
+    ///
+    /// # Returns
+    /// * `PreparedMerklePayment` - All data needed for external wallet and later completion
+    pub async fn prepare_merkle_payment_external(
+        &self,
+        data_type: DataTypes,
+        content_addrs: impl Iterator<Item = XorName>,
+        data_size: usize,
+    ) -> Result<PreparedMerklePayment, MerklePaymentError> {
+        // Collect addresses
+        let addresses: Vec<XorName> = content_addrs.collect();
+
+        // Use existing prepare_merkle_batch
+        let (tree, candidate_pools, pool_commitments, timestamp) = self
+            .prepare_merkle_batch(data_type, addresses.clone(), data_size)
+            .await?;
+
+        Ok(PreparedMerklePayment {
+            addresses,
+            salts: tree.salts().clone(),
+            depth: tree.depth(),
+            root: tree.root(),
+            candidate_pools,
+            pool_commitments,
+            merkle_payment_timestamp: timestamp,
+        })
+    }
+
+    /// Complete a merkle payment after external wallet has signed
+    ///
+    /// Call this after your external wallet has called `payForMerkleTree`
+    /// on the smart contract and the transaction has confirmed.
+    ///
+    /// # Arguments
+    /// * `prepared` - The prepared payment from `prepare_merkle_payment_external`
+    /// * `winner_pool_hash` - The winner pool hash from the MerklePaymentMade event
+    /// * `amount_paid` - The total amount paid from the event
+    ///
+    /// # Returns
+    /// * `MerklePaymentReceipt` - Receipt containing proofs for each address
+    pub fn complete_merkle_payment_external(
+        prepared: PreparedMerklePayment,
+        winner_pool_hash: [u8; 32],
+        amount_paid: AttoTokens,
+    ) -> Result<MerklePaymentReceipt, MerklePaymentError> {
+        // Find winner pool
+        let winner_pool = prepared
+            .candidate_pools
+            .into_iter()
+            .find(|pool| pool.hash() == winner_pool_hash)
+            .ok_or_else(|| MerklePaymentError::WinnerPoolNotFound {
+                hash: hex::encode(winner_pool_hash),
+            })?;
+
+        // Reconstruct tree from addresses and salts
+        let tree = MerkleTree::from_xornames_with_salts(prepared.addresses.clone(), prepared.salts)?;
+
+        // Generate proofs
+        let mut proofs = HashMap::new();
+        for (i, address) in prepared.addresses.into_iter().enumerate() {
+            let address_proof = tree.generate_address_proof(i, address)?;
+            let payment_proof = MerklePaymentProof {
+                address,
+                data_proof: address_proof,
+                winner_pool: winner_pool.clone(),
+            };
+            proofs.insert(address, payment_proof);
+        }
+
+        Ok(MerklePaymentReceipt {
+            proofs,
+            file_chunk_counts: HashMap::new(),
+            amount_paid,
+        })
     }
 }

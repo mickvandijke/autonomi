@@ -11,5 +11,9 @@ mod payments;
 mod upload;
 
 pub use file::{MerklePaymentOption, MerkleUploadError, MerkleUploadErrorWithReceipt};
-pub use payments::{MerklePaymentError, MerklePaymentReceipt};
+pub use payments::{MerklePaymentError, MerklePaymentReceipt, PreparedMerklePayment};
 pub use upload::MerklePutError;
+
+// Re-export types needed for external signer workflows
+pub use ant_evm::merkle_payments::{MerklePaymentCandidatePool, MerklePaymentProof};
+pub use evmlib::merkle_batch_payment::PoolCommitment;

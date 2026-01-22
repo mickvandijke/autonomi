@@ -65,6 +65,8 @@ pub enum MerkleTreeError {
     InvalidProof,
     #[error("Internal error: {0}")]
     Internal(String),
+    #[error("Salt count mismatch: got {got}, expected {expected}")]
+    SaltCountMismatch { got: usize, expected: usize },
 }
 
 pub type Result<T> = std::result::Result<T, MerkleTreeError>;
@@ -162,11 +164,16 @@ impl MerkleTree {
             })
             .collect();
 
-        // Add random dummy padding leaves (no salt needed - already random)
+        // Add deterministic dummy padding leaves seeded from the last real leaf
+        // This ensures the tree can be reconstructed identically from addresses + salts
         if leaf_count < padded_size {
+            use rand::SeedableRng;
+            let seed = salted_leaves.last().copied().unwrap_or([0u8; 32]);
+            let mut padding_rng = rand::rngs::StdRng::from_seed(seed);
+
             for _ in leaf_count..padded_size {
                 let mut dummy = [0u8; 32];
-                rand::Rng::fill(&mut rng, &mut dummy);
+                rand::Rng::fill(&mut padding_rng, &mut dummy);
                 salted_leaves.push(dummy);
             }
         }
@@ -202,6 +209,96 @@ impl MerkleTree {
     /// Get the original leaf count (before padding)
     pub fn leaf_count(&self) -> usize {
         self.leaf_count
+    }
+
+    /// Get the salts used for each original leaf
+    ///
+    /// Used for external signer workflows where the tree needs to be
+    /// reconstructed later with the same structure.
+    pub fn salts(&self) -> &Vec<[u8; 32]> {
+        &self.salts
+    }
+
+    /// Create a new Merkle tree from XorNames with provided salts
+    ///
+    /// This allows reconstructing a tree with the same structure as one
+    /// previously built. Used for external signer workflows.
+    ///
+    /// # Arguments
+    /// * `leaves` - Vector of XorNames (min: 2, max: 65,536)
+    /// * `salts` - Salts for each leaf (must be same length as leaves)
+    ///
+    /// # Errors
+    /// - `TooFewLeaves` if less than 2 leaves
+    /// - `TooManyLeaves` if more than 65,536 leaves
+    /// - `SaltCountMismatch` if salts.len() != leaves.len()
+    pub fn from_xornames_with_salts(leaves: Vec<XorName>, salts: Vec<[u8; 32]>) -> Result<Self> {
+        let leaf_count = leaves.len();
+
+        // Validate leaf count
+        if leaf_count < MIN_LEAVES {
+            return Err(MerkleTreeError::TooFewLeaves { got: leaf_count });
+        }
+        if leaf_count > MAX_LEAVES {
+            return Err(MerkleTreeError::TooManyLeaves { got: leaf_count });
+        }
+
+        // Validate salt count matches leaf count
+        if salts.len() != leaf_count {
+            return Err(MerkleTreeError::SaltCountMismatch {
+                got: salts.len(),
+                expected: leaf_count,
+            });
+        }
+
+        // Calculate depth and pad to next power of 2
+        let depth = tree_depth(leaf_count);
+        let padded_size = 1 << depth;
+
+        // Apply salt to each real leaf: hash(address || salt)
+        let mut salted_leaves: Vec<[u8; 32]> = leaves
+            .iter()
+            .zip(&salts)
+            .map(|(address, salt)| {
+                // Compute hash(address || salt)
+                let mut data = Vec::with_capacity(64);
+                data.extend_from_slice(address.as_ref());
+                data.extend_from_slice(salt);
+                Sha3Hasher::hash(&data)
+            })
+            .collect();
+
+        // Add random dummy padding leaves (no salt needed - already random)
+        // Use deterministic padding based on last real leaf hash to ensure
+        // the same tree is reconstructed with the same padding.
+        if leaf_count < padded_size {
+            // Use a deterministic RNG seeded from the last salted leaf
+            // This ensures padding is reproducible when reconstructing the tree
+            use rand::SeedableRng;
+            let seed = salted_leaves.last().copied().unwrap_or([0u8; 32]);
+            let mut rng = rand::rngs::StdRng::from_seed(seed);
+
+            for _ in leaf_count..padded_size {
+                let mut dummy = [0u8; 32];
+                rand::Rng::fill(&mut rng, &mut dummy);
+                salted_leaves.push(dummy);
+            }
+        }
+
+        // Build rs_merkle tree from salted hashes
+        let inner = ant_merkle::MerkleTree::<Sha3Hasher>::from_leaves(&salted_leaves);
+
+        let root = inner.root().ok_or(MerkleTreeError::Internal(
+            "Tree must have root after construction".to_string(),
+        ))?;
+
+        Ok(Self {
+            inner,
+            root: XorName(root),
+            leaf_count,
+            depth,
+            salts,
+        })
     }
 
     /// Get midpoint nodes at depth/2
@@ -1940,6 +2037,135 @@ mod tests {
                 expected_depth,
                 "Depth mismatch for {leaf_count} leaves"
             );
+        }
+    }
+
+    #[test]
+    fn test_salts_getter() {
+        let leaves = make_test_leaves(16);
+        let tree = MerkleTree::from_xornames(leaves.clone()).unwrap();
+
+        // Salts should have same length as leaves
+        assert_eq!(tree.salts().len(), leaves.len());
+
+        // All salts should be unique (with very high probability)
+        let unique_salts: std::collections::HashSet<_> = tree.salts().iter().collect();
+        assert_eq!(unique_salts.len(), tree.salts().len());
+    }
+
+    #[test]
+    fn test_from_xornames_with_salts_produces_same_tree() {
+        // Build original tree
+        let leaves = make_test_leaves(100);
+        let tree1 = MerkleTree::from_xornames(leaves.clone()).unwrap();
+
+        // Reconstruct tree with same salts
+        let tree2 =
+            MerkleTree::from_xornames_with_salts(leaves.clone(), tree1.salts().clone()).unwrap();
+
+        // Both trees should have identical properties
+        assert_eq!(tree1.root(), tree2.root(), "Roots should match");
+        assert_eq!(tree1.depth(), tree2.depth(), "Depths should match");
+        assert_eq!(
+            tree1.leaf_count(),
+            tree2.leaf_count(),
+            "Leaf counts should match"
+        );
+
+        // Proofs from reconstructed tree should be valid
+        for (i, address) in leaves.iter().enumerate() {
+            let proof1 = tree1.generate_address_proof(i, *address).unwrap();
+            let proof2 = tree2.generate_address_proof(i, *address).unwrap();
+
+            assert!(proof1.verify(), "Original proof should verify");
+            assert!(proof2.verify(), "Reconstructed proof should verify");
+        }
+    }
+
+    #[test]
+    fn test_from_xornames_with_salts_error_on_mismatch() {
+        let leaves = make_test_leaves(16);
+        let tree = MerkleTree::from_xornames(leaves.clone()).unwrap();
+
+        // Try to reconstruct with wrong number of salts
+        let wrong_salts = tree.salts()[..8].to_vec(); // Only half the salts
+        let result = MerkleTree::from_xornames_with_salts(leaves.clone(), wrong_salts);
+
+        assert!(matches!(
+            result,
+            Err(MerkleTreeError::SaltCountMismatch { got: 8, expected: 16 })
+        ));
+    }
+
+    #[test]
+    fn test_from_xornames_with_salts_validates_leaf_count() {
+        // Too few leaves
+        let result = MerkleTree::from_xornames_with_salts(
+            vec![XorName::from_content(b"only one")],
+            vec![[0u8; 32]],
+        );
+        assert!(matches!(result, Err(MerkleTreeError::TooFewLeaves { .. })));
+
+        // Too many leaves
+        let many_leaves: Vec<XorName> = (0..(MAX_LEAVES + 1))
+            .map(|i| XorName::from_content(&i.to_le_bytes()))
+            .collect();
+        let many_salts: Vec<[u8; 32]> = vec![[0u8; 32]; MAX_LEAVES + 1];
+        let result = MerkleTree::from_xornames_with_salts(many_leaves, many_salts);
+        assert!(matches!(result, Err(MerkleTreeError::TooManyLeaves { .. })));
+    }
+
+    #[test]
+    fn test_reconstructed_tree_reward_candidates_match() {
+        let leaves = make_test_leaves(64);
+        let tree1 = MerkleTree::from_xornames(leaves.clone()).unwrap();
+
+        // Reconstruct tree
+        let tree2 =
+            MerkleTree::from_xornames_with_salts(leaves.clone(), tree1.salts().clone()).unwrap();
+
+        let timestamp = 12345u64;
+        let candidates1 = tree1.reward_candidates(timestamp).unwrap();
+        let candidates2 = tree2.reward_candidates(timestamp).unwrap();
+
+        // Same number of candidates
+        assert_eq!(candidates1.len(), candidates2.len());
+
+        // All candidates should match
+        for (c1, c2) in candidates1.iter().zip(candidates2.iter()) {
+            assert_eq!(c1.address(), c2.address(), "Candidate addresses should match");
+            assert_eq!(c1.hash(), c2.hash(), "Candidate hashes should match");
+        }
+    }
+
+    #[test]
+    fn test_reconstructed_tree_proofs_verify_against_original() {
+        // This test simulates the external signer workflow:
+        // 1. Build tree, extract salts
+        // 2. After payment, reconstruct tree with salts
+        // 3. Generate proofs from reconstructed tree
+        // 4. Verify proofs work (they should be valid)
+
+        let leaves = make_test_leaves(50);
+        let tree1 = MerkleTree::from_xornames(leaves.clone()).unwrap();
+        let salts = tree1.salts().clone();
+        let root = tree1.root();
+        let depth = tree1.depth();
+
+        // Simulate: after payment, we reconstruct
+        let tree2 = MerkleTree::from_xornames_with_salts(leaves.clone(), salts).unwrap();
+
+        // Verify reconstructed tree has same properties
+        assert_eq!(tree2.root(), root);
+        assert_eq!(tree2.depth(), depth);
+
+        // Generate proofs from reconstructed tree and verify
+        for (i, address) in leaves.iter().enumerate() {
+            let proof = tree2.generate_address_proof(i, *address).unwrap();
+            assert!(proof.verify(), "Proof from reconstructed tree should verify");
+
+            // Verify proof is against the correct root
+            assert_eq!(proof.root(), &root);
         }
     }
 }
