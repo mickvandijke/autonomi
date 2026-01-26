@@ -249,6 +249,12 @@ where
             .calldata()
             .to_owned();
 
+        debug!(
+            "Merkle payment calldata size: {} bytes ({:.2} KB)",
+            calldata.len(),
+            calldata.len() as f64 / 1024.0
+        );
+
         Ok((calldata, *self.contract.address()))
     }
 
