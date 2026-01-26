@@ -6,8 +6,42 @@
 // KIND, either express or implied. Please review the Licences for the specific language governing
 // permissions and limitations relating to use of the SAFE Network Software.
 
+use crate::common::{Address, U256};
 use crate::contract::merkle_payment_vault::interface::IMerklePaymentVault;
 use crate::retry;
+use alloy::sol;
+
+// Define ERC20 error types from OpenZeppelin's ERC20 implementation
+// These errors can be thrown by the ANT token during transferFrom calls
+sol! {
+    #[allow(missing_docs)]
+    #[derive(Debug, PartialEq, Eq)]
+    library ERC20Errors {
+        error ERC20InsufficientAllowance(address spender, uint256 allowance, uint256 needed);
+        error ERC20InsufficientBalance(address sender, uint256 balance, uint256 needed);
+        error ERC20InvalidReceiver(address receiver);
+        error ERC20InvalidSender(address sender);
+        error ERC20InvalidSpender(address spender);
+        error ERC20InvalidApprover(address approver);
+    }
+}
+
+// Define SafeERC20 and Address library errors from OpenZeppelin
+// These can be thrown when using SafeERC20.safeTransferFrom
+sol! {
+    #[allow(missing_docs)]
+    #[derive(Debug, PartialEq, Eq)]
+    library OpenZeppelinErrors {
+        /// An operation with an ERC-20 token failed (SafeERC20)
+        error SafeERC20FailedOperation(address token);
+        /// A call to an address target failed (Address library)
+        error FailedInnerCall();
+        /// There's no code at target address (Address library)
+        error AddressEmptyCode(address target);
+        /// Insufficient balance for address - used in native token transfers (Address library)
+        error AddressInsufficientBalance(address account);
+    }
+}
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -61,10 +95,49 @@ pub enum Error {
     },
     #[error("Wrong pool count: expected {expected}, got {got}")]
     WrongPoolCount { expected: u64, got: u64 },
+
+    // ERC20 token errors (from ANT token during transferFrom)
+    #[error(
+        "ERC20: insufficient allowance for spender {spender} (has {allowance}, needs {needed})"
+    )]
+    Erc20InsufficientAllowance {
+        spender: Address,
+        allowance: U256,
+        needed: U256,
+    },
+    #[error("ERC20: insufficient balance for sender {sender} (has {balance}, needs {needed})")]
+    Erc20InsufficientBalance {
+        sender: Address,
+        balance: U256,
+        needed: U256,
+    },
+    #[error("ERC20: invalid receiver address {receiver} (cannot transfer to zero address)")]
+    Erc20InvalidReceiver { receiver: Address },
+    #[error("ERC20: invalid sender address {sender}")]
+    Erc20InvalidSender { sender: Address },
+    #[error("ERC20: invalid spender address {spender}")]
+    Erc20InvalidSpender { spender: Address },
+    #[error("ERC20: invalid approver address {approver}")]
+    Erc20InvalidApprover { approver: Address },
+
+    // SafeERC20 and Address library errors (from OpenZeppelin)
+    #[error("SafeERC20: operation failed for token {token}")]
+    SafeErc20FailedOperation { token: Address },
+    #[error("Address: inner call failed")]
+    FailedInnerCall,
+    #[error("Address: no code at target address {target}")]
+    AddressEmptyCode { target: Address },
+    #[error("Address: insufficient balance for account {account}")]
+    AddressInsufficientBalance { account: Address },
 }
 
 impl Error {
     /// Try to decode a contract error from revert data
+    ///
+    /// This attempts to decode errors from:
+    /// 1. MerklePaymentVault contract errors
+    /// 2. ERC20 token errors (from ANT token during transferFrom calls)
+    /// 3. OpenZeppelin library errors (SafeERC20, Address)
     pub(crate) fn try_decode_revert(data: &[u8]) -> Option<Self> {
         use alloy::sol_types::SolInterface;
 
@@ -83,7 +156,69 @@ impl Error {
             return Some(Self::from_contract_error(contract_error));
         }
 
+        // Try to decode as ERC20 errors (from ANT token during transferFrom)
+        if let Ok(erc20_error) =
+            ERC20Errors::ERC20ErrorsErrors::abi_decode_raw(selector, error_data)
+        {
+            return Some(Self::from_erc20_error(erc20_error));
+        }
+
+        // Try to decode as OpenZeppelin library errors (SafeERC20, Address)
+        if let Ok(oz_error) =
+            OpenZeppelinErrors::OpenZeppelinErrorsErrors::abi_decode_raw(selector, error_data)
+        {
+            return Some(Self::from_openzeppelin_error(oz_error));
+        }
+
         None
+    }
+
+    /// Convert a decoded OpenZeppelin library error to our Error type
+    fn from_openzeppelin_error(error: OpenZeppelinErrors::OpenZeppelinErrorsErrors) -> Self {
+        use OpenZeppelinErrors::OpenZeppelinErrorsErrors;
+
+        match error {
+            OpenZeppelinErrorsErrors::SafeERC20FailedOperation(e) => {
+                Self::SafeErc20FailedOperation { token: e.token }
+            }
+            OpenZeppelinErrorsErrors::FailedInnerCall(_) => Self::FailedInnerCall,
+            OpenZeppelinErrorsErrors::AddressEmptyCode(e) => {
+                Self::AddressEmptyCode { target: e.target }
+            }
+            OpenZeppelinErrorsErrors::AddressInsufficientBalance(e) => {
+                Self::AddressInsufficientBalance { account: e.account }
+            }
+        }
+    }
+
+    /// Convert a decoded ERC20 error to our Error type
+    fn from_erc20_error(error: ERC20Errors::ERC20ErrorsErrors) -> Self {
+        use ERC20Errors::ERC20ErrorsErrors;
+
+        match error {
+            ERC20ErrorsErrors::ERC20InsufficientAllowance(e) => Self::Erc20InsufficientAllowance {
+                spender: e.spender,
+                allowance: e.allowance,
+                needed: e.needed,
+            },
+            ERC20ErrorsErrors::ERC20InsufficientBalance(e) => Self::Erc20InsufficientBalance {
+                sender: e.sender,
+                balance: e.balance,
+                needed: e.needed,
+            },
+            ERC20ErrorsErrors::ERC20InvalidReceiver(e) => Self::Erc20InvalidReceiver {
+                receiver: e.receiver,
+            },
+            ERC20ErrorsErrors::ERC20InvalidSender(e) => Self::Erc20InvalidSender {
+                sender: e.sender,
+            },
+            ERC20ErrorsErrors::ERC20InvalidSpender(e) => Self::Erc20InvalidSpender {
+                spender: e.spender,
+            },
+            ERC20ErrorsErrors::ERC20InvalidApprover(e) => Self::Erc20InvalidApprover {
+                approver: e.approver,
+            },
+        }
     }
 
     /// Convert a decoded contract error to our Error type
